@@ -1,0 +1,1529 @@
+<!doctype html>
+<html>
+<head>
+  <script>
+    try {
+      window.localStorage.getItem('x')
+    } catch (e) {
+      const store = new Map()
+      const shim = {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => { store.set(k, String(v)) },
+        removeItem: (k) => { store.delete(k) },
+        clear: () => { store.clear() },
+        key: (i) => Array.from(store.keys())[i] ?? null,
+        get length() { return store.size },
+      }
+      Object.defineProperty(window, 'localStorage', { value: shim, configurable: true })
+    }
+  </script>
+  <style>
+    :root { --bg: #FFFFFF; --muted: #9AA0A6; --border: #E9E9EA; --accent: #0A84FF; --control-bg: #F4F5F7; --radius: 12px; }
+    html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, 'Helvetica Neue', Arial; background: transparent; }
+    #plugin-root { position: relative; width: 100%; height: 100%; min-height: 100vh; background: var(--bg); border-radius: 0; box-shadow: none; overflow: hidden; color: #111827; display: flex; flex-direction: column; }
+    #plugin-root.collapsed fig-content,
+    #plugin-root.collapsed fig-footer,
+    #plugin-root.collapsed .onboarding,
+    #plugin-root.collapsed .resize-edge-b,
+    #plugin-root.collapsed .resize-corner { display: none; }
+    .onboarding { display: none; flex-direction: column; position: absolute; inset: 0; background: #FFFFFF; z-index: 2000; }
+    .onboarding-body { flex: 1 1 auto; overflow-y: auto; padding: 28px 24px 20px 24px; }
+    .onboarding-body h1 { font-size: 20px; margin: 0 0 8px 0; color: #111827; line-height: 1.3; }
+    .onboarding-lead { font-size: 13px; color: #6B7280; margin: 0 0 22px 0; line-height: 1.5; }
+    .onboarding-steps { list-style: none; margin: 0 0 20px 0; padding: 0; display: flex; flex-direction: column; gap: 16px; counter-reset: step; }
+    .onboarding-steps li { display: flex; gap: 12px; align-items: flex-start; }
+    .onboarding-steps li::before { counter-increment: step; content: counter(step); flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: rgba(10,132,255,0.1); color: var(--accent); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    .onboarding-steps .step-text { display: flex; flex-direction: column; gap: 2px; padding-top: 2px }
+    .onboarding-steps strong { font-size: 13px; color: #111827; }
+    .onboarding-steps span { font-size: 12px; color: #6B7280; line-height: 1.45; }
+    .onboarding-steps code { background: var(--control-bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    .onboarding-note { font-size: 12px; color: #111827; background: #FFF7E6; border-left: 3px solid #F5A623; border-radius: 6px; padding: 10px 12px; line-height: 1.5; margin-bottom: 22px; }
+    .onboarding-footer { border-top: 1px solid var(--border); padding: 12px 16px; flex-shrink: 0; }
+    .onboarding-cta { width: 100%; background: var(--accent); color: white; border: none; border-radius: 12px; padding: 12px 18px; font-weight: 700; font-size: 14px; cursor: pointer; box-shadow: 0 6px 18px rgba(10,132,255,0.14); }
+    .resize-edge-r { position: fixed; top: 0; right: 0; width: 6px; height: 100%; cursor: ew-resize; z-index: 1000; touch-action: none; }
+    .resize-edge-b { position: fixed; left: 0; bottom: 0; width: 100%; height: 6px; cursor: ns-resize; z-index: 1000; touch-action: none; }
+    .resize-corner { position: fixed; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; z-index: 1001; touch-action: none; }
+    .panel-header { display:flex; align-items:center; justify-content:space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink:0 }
+    .panel-header .left { display:flex; align-items:center; gap:10px }
+    .panel-header .logo { width:28px; height:28px; background:#111827; color:white; display:flex; align-items:center; justify-content:center; border-radius:6px; font-weight:700 }
+    .panel-header .title { font-weight:600; font-size:14px; color:#111827 }
+    .panel-header .icons { display:flex; gap:8px; align-items:center }
+    .panel-header button.icon { border: none; background: transparent; width:24px; height:24px; border-radius:8px; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; padding:0; color:#6B7280 }
+    .panel-header button.icon:hover { background: rgba(10,132,255,0.06); color:#111827 }
+    fig-content { display:block; padding: 12px 16px 8px 16px; overflow-y: auto; flex: 1 1 auto; }
+    .section-title { font-size: 13px; font-weight: 700; color: #111827; margin: 0 0 10px 0; }
+    .chart-type-grid { display:grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 4px 0 12px 0 }
+    .chart-type-btn { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:12px; border:1px solid var(--border); border-radius:10px; background: #FBFCFD; cursor:pointer; min-height:72px }
+    .chart-type-btn img { width:22px; height:22px; opacity:0.7 }
+    .chart-type-btn span { font-size:13px; color:#6B7280; margin-top:6px }
+    .chart-type-btn:hover { background: #FFFFFF }
+    .chart-type-btn.selected { background: rgba(10,132,255,0.06); border-color: var(--accent); box-shadow: 0 2px 0 rgba(10,132,255,0.06) inset }
+    .chart-type-btn.selected img { filter: none; opacity:1 }
+    .chart-type-btn.selected span { color: var(--accent); font-weight:600 }
+    fig-group { display:block; margin-top:6px }
+    fig-group label { display:block }
+    fig-field { display:flex; flex-direction:column; gap:6px; padding: 12px 0 }
+    fig-field label { font-size:13px; color:#111827 }
+    fig-input-text, fig-input-color { display:inline-block }
+    fig-input-text input, .data-block input { height:36px; border-radius:10px; background:var(--control-bg); border: none; padding: 8px 12px; font-size:13px }
+    .settings { padding: 6px 0 12px 0 }
+    .data-header { display:flex; align-items:center; justify-content:space-between; padding-top:18px }
+    .data-header span { font-weight:700; color:#111827 }
+    .data-footer { display:flex; justify-content:flex-end; padding-top:6px }
+    .add-btn { color: var(--accent); font-weight:600; border:none; background:transparent; cursor:pointer }
+    .secondary-btn { color: var(--accent); font-weight:600; font-size:13px; border:1px solid var(--accent); border-radius:10px; background:transparent; padding:8px 14px; cursor:pointer }
+    .secondary-btn:hover { background: rgba(10,132,255,0.06) }
+    .color-mode-group { display:flex; gap:6px }
+    .color-mode-btn { flex:1; padding:8px 6px; border:1px solid var(--border); border-radius:8px; background:#FBFCFD; cursor:pointer; font-size:12px; color:#6B7280; text-align:center }
+    .color-mode-btn:hover { background:#FFFFFF }
+    .color-mode-btn.selected { background: rgba(10,132,255,0.06); border-color: var(--accent); color: var(--accent); font-weight:600 }
+    .data-scroll { overflow-x: auto; }
+    .column-labels { display:flex; gap:4px; padding:8px 2px; color:#6B7280; font-size:12px; align-items:center }
+    .column-labels .col-label { flex: 0 1 90px; min-width:56px; max-width:45%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; position:sticky; left:0; background:var(--bg); z-index:1 }
+    .column-labels .col-value { flex: 1 1 30px; min-width:30px; display:flex; align-items:center; gap:2px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis }
+    .col-series-remove { width:12px; height:12px; border:none; background:transparent; color:#9AA0A6; font-size:10px; line-height:1; cursor:pointer; padding:0; border-radius:3px; flex-shrink:0 }
+    .col-series-remove:hover { color:#6B7280; background:rgba(0,0,0,0.05) }
+    .col-add-series { margin-left:auto; flex-shrink:0; width:24px; height:24px; border:none; background:transparent; color:var(--accent); font-size:16px; font-weight:700; line-height:1; cursor:pointer; border-radius:8px }
+    .col-add-series:hover { background: rgba(10,132,255,0.06) }
+    #data-blocks { padding-bottom:12px }
+    .data-block { display:flex; gap:4px; align-items:center; padding:6px 2px; border-radius:8px }
+    .block-label { flex: 0 1 90px; min-width:56px; max-width:45%; border-radius:8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; position:sticky; left:0; background:var(--bg); z-index:1; font-weight:400; color:#111827 }
+    .block-mvalue { flex: 1 1 30px; min-width:30px }
+    /* KPI's row order is Value, Label, Description (not the generic Label-first layout every
+       other chart type uses) — the label sits in the middle, so it can't stay sticky-left
+       like it does everywhere else, and gets the same flexible width as the value cells. */
+    #data-blocks.kpi-mode .block-label { position: static; left: auto; flex: 1 1 30px; min-width:30px; max-width:none }
+    .data-block input.block-mvalue { padding: 7px 5px }
+    /* Timeline: a nested accordion (Phase -> Subtasks) instead of a flat checkbox-driven
+       row list — the phase/task distinction is structural (position in the tree), not a
+       per-row flag, so a subtask is simply nested and indented inside its phase's card. */
+    #timeline-tree { padding-bottom: 8px }
+    .tl-phase-card { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden }
+    .tl-phase-header { display:flex; align-items:center; gap:6px; padding:8px; background: var(--control-bg) }
+    .tl-collapse-btn { width:22px; height:22px; flex:0 0 auto; border:none; background:transparent; color:#6B7280; cursor:pointer; font-size:11px; display:flex; align-items:center; justify-content:center; border-radius:6px }
+    .tl-collapse-btn:hover { background: rgba(0,0,0,0.05) }
+    .tl-phase-label { flex: 1 1 120px; min-width:80px; font-weight:700; color:#D61526; border-radius:8px }
+    .tl-task-list { padding: 4px 10px 10px 34px; display:flex; flex-direction:column; gap:4px }
+    .tl-task-row { display:flex; align-items:center; gap:6px }
+    .tl-task-label { flex: 1 1 120px; min-width:70px; border-radius:8px; background:transparent; border:1px solid var(--border) }
+    .tl-add-task { align-self:flex-start; padding:4px 2px; font-size:12px }
+    /* Date-range trigger: opens the custom popover below instead of a native <input
+       type="date"> — the native calendar popup can't be restyled at all (no CSS hook into
+       its internals), so a single click/tap/range-select date range needs its own
+       from-scratch calendar to get "today" and the Start→End range to read clearly. */
+    .tl-date-range-btn { flex: 0 0 148px; min-width:148px; height:32px; padding:4px 10px; font-size:11px; border-radius:8px; background:var(--control-bg); border:none; cursor:pointer; text-align:left; color:#111827 }
+    .tl-date-range-btn.placeholder { color:#9AA0A6 }
+    .tl-date-range-btn:hover { background:#EDEEF1 }
+    .date-popover { position:fixed; z-index:3000; width:272px; background:#FFFFFF; border-radius:14px; box-shadow:0 12px 32px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.05); padding:14px }
+    .date-popover-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px }
+    .date-popover-header button { border:none; background:transparent; width:26px; height:26px; border-radius:8px; cursor:pointer; font-size:15px; color:#374151 }
+    .date-popover-header button:hover { background:rgba(0,0,0,0.06) }
+    .date-popover-header span { font-weight:700; font-size:13px; color:#111827 }
+    .date-popover-weekdays { display:grid; grid-template-columns:repeat(7,1fr); text-align:center; font-size:11px; color:#9AA0A6; margin-bottom:4px }
+    .date-popover-grid { display:grid; grid-template-columns:repeat(7,1fr) }
+    .dp-cell { position:relative; border:none; background:transparent; height:34px; padding:0; cursor:pointer; font-size:12px; color:#111827 }
+    .dp-cell.dp-other-month { color:#C7CBD1 }
+    /* The connecting "band": full-width for a day strictly between Start/End, half-width
+       (starting/ending at the day's own filled circle) for the two endpoints themselves —
+       this is what makes the range read as one continuous shape instead of separate dots. */
+    .dp-cell.dp-range-mid::before { content:''; position:absolute; top:2px; bottom:2px; left:0; right:0; background:rgba(10,132,255,0.12) }
+    .dp-cell.dp-range-start::before { content:''; position:absolute; top:2px; bottom:2px; left:50%; right:0; background:rgba(10,132,255,0.12) }
+    .dp-cell.dp-range-end::before { content:''; position:absolute; top:2px; bottom:2px; left:0; right:50%; background:rgba(10,132,255,0.12) }
+    .dp-cell.dp-range-start.dp-range-end::before { display:none }
+    .dp-day-num { position:relative; z-index:1; display:flex; align-items:center; justify-content:center; width:26px; height:26px; margin:0 auto; border-radius:50% }
+    /* A thin outline, not a fill — a filled circle already means "selected", so today needs
+       a visibly different, lighter treatment to avoid reading as a second selection. */
+    .dp-cell.dp-today .dp-day-num { border:1.5px solid var(--accent) }
+    .dp-cell.dp-range-start .dp-day-num, .dp-cell.dp-range-end .dp-day-num { background:var(--accent); color:#fff }
+    .dp-cell:hover .dp-day-num { background:rgba(0,0,0,0.06) }
+    .dp-cell.dp-range-start:hover .dp-day-num, .dp-cell.dp-range-end:hover .dp-day-num { background:var(--accent) }
+    .date-popover-footer { display:flex; justify-content:space-between; margin-top:10px }
+    .date-popover-footer button { border:none; background:transparent; color:var(--accent); font-weight:600; font-size:13px; cursor:pointer; padding:6px 4px }
+    /* Table: cells hold free-text sentences (not short numbers/labels), so columns get
+       generous, evenly-flexible widths instead of the generic 90px column, and their
+       content is allowed to read in full rather than being ellipsis-truncated. */
+    #data-blocks.table-mode .block-label,
+    #column-labels.table-mode .col-label,
+    #data-blocks.table-mode .block-mvalue,
+    #column-labels.table-mode .col-value {
+      flex: 1 1 160px;
+      min-width: 140px;
+      max-width: none;
+      overflow: visible;
+      white-space: normal;
+    }
+    /* Plain border:none/background:transparent (still set inline for layout reasons) reads
+       as static text, not a field you can click into — a dashed underline that solidifies
+       and tints on hover/focus is the minimum affordance for "this is editable". */
+    #column-labels.table-mode .col-name-input {
+      font-family: inherit;
+      border: none;
+      border-bottom: 1px dashed #C7CBD1;
+      border-radius: 0;
+      transition: border-color .12s, background-color .12s;
+    }
+    #column-labels.table-mode .col-name-input:hover {
+      border-bottom-style: solid;
+      border-bottom-color: #9AA0A6;
+      background: rgba(0,0,0,0.03);
+    }
+    #column-labels.table-mode .col-name-input:focus {
+      border-bottom-style: solid;
+      border-bottom-color: var(--accent);
+      background: rgba(10,132,255,0.05);
+      outline: none;
+    }
+    .block-delete { width:28px; height:28px; display:flex; align-items:center; justify-content:center; border:none; background:transparent; padding:0; color:#9AA0A6; cursor:pointer }
+    .block-delete:hover { color:#6B7280 }
+fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+#status-label { color:#6B7280; font-size: 13px; }
+    #go { background: var(--accent); color: white; padding: 12px 18px; border-radius:12px; box-shadow: 0 6px 18px rgba(10,132,255,0.14); font-weight:700; min-width:160px; border:none; cursor:pointer }
+  </style>
+</head>
+  <body>
+  <div id="plugin-root">
+    <div class="panel-header" id="panelHeader">
+      <div class="left">
+        <span class="title">Dynamic Charts</span>
+      </div>
+      <div class="icons">
+        <button type="button" id="helpBtn" class="icon" title="Show welcome guide">?</button>
+        <button type="button" id="collapseBtn" class="icon" title="Minimize">&#8722;</button>
+      </div>
+    </div>
+    <div class="onboarding" id="onboarding">
+      <div class="onboarding-body">
+        <h1>Welcome to Dynamic Charts</h1>
+        <p class="onboarding-lead">Turn a few numbers into a fully editable chart — built from real layers on the canvas, not a pasted image.</p>
+        <div class="onboarding-note">
+          <strong>Before you start:</strong> this plugin renders text using the <strong>Noe Display</strong> and <strong>Moderat</strong> fonts. Make sure they're installed in your Figma account — without them, chart creation will fail.
+        </div>
+        <ol class="onboarding-steps">
+          <li>
+            <div class="step-text">
+              <strong>Pick a chart type</strong>
+              <span>Vertical, horizontal, line, pie, and more — see the icons above.</span>
+            </div>
+          </li>
+          <li>
+            <div class="step-text">
+              <strong>Choose a look</strong>
+              <span>Positive (light), Negative (dark), or pick your own color.</span>
+            </div>
+          </li>
+          <li>
+            <div class="step-text">
+              <strong>Add your data</strong>
+              <span>Fill in a label and a value for each row. Some chart types have a second value column too — just fill that in to compare.</span>
+            </div>
+          </li>
+          <li>
+            <div class="step-text">
+              <strong>Hit Create</strong>
+              <span>Your chart lands on the canvas as fully editable native layers.</span>
+            </div>
+          </li>
+          <li>
+            <div class="step-text">
+              <strong>Edit anytime</strong>
+              <span>Select an existing chart on the canvas and its data loads back into this panel. Change the values and hit Update to refresh it.</span>
+            </div>
+          </li>
+        </ol>
+      </div>
+      <div class="onboarding-footer">
+        <button type="button" id="onboardingDone" class="onboarding-cta">Get started</button>
+      </div>
+    </div>
+    <fig-content>
+      <div class="section-title">Select a chart type</div>
+      <div class="chart-type-grid" id="chartTypeGrid"></div>
+      <fig-group name="Settings">
+        <fig-field>
+          <label>Color</label>
+          <div class="color-mode-group" id="colorModeGroup">
+            <button type="button" class="color-mode-btn" data-mode="positive">Positive</button>
+            <button type="button" class="color-mode-btn" data-mode="negative">Negative</button>
+            <button type="button" class="color-mode-btn" data-mode="custom">Select color</button>
+          </div>
+          <div id="customColorRow" style="display:none;align-items:center;gap:8px">
+            <input id="barColor" type="color" value="#D61526" style="height:36px;width:48px;border-radius:8px;border:none;padding:0" />
+            <input id="barColorHex" type="text" value="#D61526" style="height:36px;border-radius:8px;padding:8px 10px;border:none;background:var(--control-bg)" />
+          </div>
+        </fig-field>
+        <fig-field id="overlappedField" style="display:none">
+          <label>Overlapped</label>
+          <input id="overlapped" type="checkbox" style="width:20px;height:20px" />
+        </fig-field>
+        <fig-field id="timelineFields" style="display:none">
+          <label>Granularity</label>
+          <div class="color-mode-group" id="granularityGroup">
+            <button type="button" class="color-mode-btn" data-mode="week">Weekly</button>
+            <button type="button" class="color-mode-btn" data-mode="biweekly">Biweekly</button>
+            <button type="button" class="color-mode-btn" data-mode="monthly">Monthly</button>
+          </div>
+        </fig-field>
+        <fig-field id="budgetFields" style="display:none">
+          <label>Mostrar precio</label>
+          <div class="color-mode-group" id="vatModeGroup">
+            <button type="button" class="color-mode-btn" data-mode="excluded">Sin IVA</button>
+            <button type="button" class="color-mode-btn" data-mode="included">Con IVA</button>
+          </div>
+          <label id="vatShowTotalField" style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:#111827;font-weight:400">
+            <input id="vatShowTotal" type="checkbox" style="width:18px;height:18px" />
+            Mostrar total con IVA
+          </label>
+        </fig-field>
+      </fig-group>
+      <div class="data-header">
+        <span>Data entries</span>
+      </div>
+      <div class="data-scroll" id="genericDataScroll">
+        <div class="column-labels" id="column-labels">
+          <span class="col-label">Label</span>
+          <span class="col-value" id="col-val1">Value</span>
+          <span class="col-spacer"></span>
+        </div>
+        <div id="data-blocks"></div>
+      </div>
+      <div id="timeline-tree" style="display:none"></div>
+      <div class="data-footer">
+        <button class="add-btn" id="addEntry">+ Add</button>
+      </div>
+    </fig-content>
+    <fig-footer>
+      <label id="status-label"></label>
+      <button id="go" type="button">Create chart</button>
+    </fig-footer>
+  </div>
+  <div class="date-popover" id="dateRangePopover" style="display:none">
+    <div class="date-popover-header">
+      <button type="button" id="dpPrevMonth">‹</button>
+      <span id="dpMonthLabel"></span>
+      <button type="button" id="dpNextMonth">›</button>
+    </div>
+    <div class="date-popover-weekdays">
+      <span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span>
+    </div>
+    <div class="date-popover-grid" id="dpGrid"></div>
+    <div class="date-popover-footer">
+      <button type="button" id="dpClear">Clear</button>
+      <button type="button" id="dpDone">Done</button>
+    </div>
+  </div>
+  <div class="resize-edge-r" id="resizeRight"></div>
+  <div class="resize-edge-b" id="resizeBottom"></div>
+  <div class="resize-corner" id="resizeCorner"></div>
+  <script>
+    const chartIcons = {
+      vertical: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 46" fill="none"><rect x="4" width="9" height="39" fill="black"/><rect y="42" width="60" height="4" fill="black"/><rect x="18" width="9" height="39" fill="black"/><rect x="32" width="9" height="39" fill="black"/><rect x="46" width="9" height="39" fill="black"/></svg>',
+      horizontal: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 46 46" fill="none"><rect x="46" y="3" width="7" height="39" transform="rotate(90 46 3)" fill="black"/><rect x="4" width="46" height="4" transform="rotate(90 4 0)" fill="black"/><rect x="46" y="14" width="7" height="39" transform="rotate(90 46 14)" fill="black"/><rect x="46" y="25" width="6" height="39" transform="rotate(90 46 25)" fill="black"/><rect x="46" y="35" width="7" height="39" transform="rotate(90 46 35)" fill="black"/></svg>',
+      line: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 39" fill="none"><rect y="34.4434" width="60" height="4" fill="black"/><path d="M2 20L14.5 10L28.5 18L42.5 6L58 12" stroke="black" stroke-width="2.5" stroke-linecap="round"/><path d="M2 28L14.5 24L28.5 30L42.5 20L58 26" stroke="black" stroke-width="2" stroke-linecap="round" opacity="0.4"/></svg>',
+      radar: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none"><circle cx="20" cy="20" r="18" stroke="black" stroke-width="1.5"/><circle cx="20" cy="20" r="10" stroke="black" stroke-width="0.8" opacity="0.4"/><polygon points="20,4 35,14 32,32 8,32 5,14" stroke="black" stroke-width="1.5" fill="black" fill-opacity="0.15"/></svg>',
+      pie: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 47 48" fill="none"><circle cx="23" cy="24.5" r="23" fill="black"/><path d="M23 1.5V25L45 30.5" stroke="%23F5F5F5" stroke-width="3" stroke-linecap="round"/></svg>',
+      donut: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 47 48" fill="none"><circle cx="23" cy="24.5" r="23" fill="black"/><path d="M23 1.5V23.4512L45 29" stroke="%23F5F5F5" stroke-width="3" stroke-linecap="round"/><circle cx="23.5" cy="24" r="13.5" fill="%23F5F5F5"/></svg>',
+      grouped: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 46" fill="none"><rect y="42" width="60" height="4" fill="black"/><rect x="4" y="10" width="7" height="32" fill="black"/><rect x="12" y="18" width="7" height="24" fill="black" opacity="0.4"/><rect x="24" y="5" width="7" height="37" fill="black"/><rect x="32" y="14" width="7" height="28" fill="black" opacity="0.4"/><rect x="44" y="16" width="7" height="26" fill="black"/><rect x="52" y="22" width="7" height="20" fill="black" opacity="0.4"/></svg>',
+      progress: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 53 36" fill="none"><rect x="0.5" y="0.5" width="52" height="15" rx="3.5" stroke="black"/><rect x="0.5" y="20.5" width="52" height="15" rx="3.5" stroke="black"/><rect width="28.2667" height="16" rx="4" fill="black"/><rect y="20" width="44.1667" height="16" rx="4" fill="black"/></svg>',
+      timeline: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 40" fill="none"><rect x="4" y="2" width="20" height="5" rx="2" fill="black"/><rect x="8" y="12" width="24" height="4" rx="2" fill="black" opacity="0.6"/><rect x="20" y="21" width="20" height="4" rx="2" fill="black" opacity="0.6"/><rect x="32" y="30" width="20" height="4" rx="2" fill="black" opacity="0.6"/></svg>',
+      budget: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 48" fill="none"><rect x="1" y="1" width="42" height="46" rx="3" stroke="black" stroke-width="2.5"/><line x1="8" y1="14" x2="36" y2="14" stroke="black" stroke-width="2.5" opacity="0.45"/><line x1="8" y1="23" x2="36" y2="23" stroke="black" stroke-width="2.5" opacity="0.45"/><line x1="8" y1="32" x2="24" y2="32" stroke="black" stroke-width="2.5" opacity="0.45"/><line x1="8" y1="40" x2="36" y2="40" stroke="black" stroke-width="3.5"/></svg>',
+      table: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 40" fill="none"><rect x="1" y="1" width="46" height="38" rx="3" stroke="black" stroke-width="2.5"/><line x1="1" y1="12" x2="47" y2="12" stroke="black" stroke-width="2.5"/><line x1="1" y1="21" x2="47" y2="21" stroke="black" stroke-width="1.5" opacity="0.45"/><line x1="1" y1="30" x2="47" y2="30" stroke="black" stroke-width="1.5" opacity="0.45"/></svg>',
+      kpi: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 40" fill="none"><line x1="6" y1="12" x2="6" y2="24" stroke="black" stroke-width="3.5" stroke-linecap="round"/><line x1="0" y1="18" x2="12" y2="18" stroke="black" stroke-width="3.5" stroke-linecap="round"/><rect x="19" y="2" width="9" height="34" rx="2" fill="black"/><rect x="31" y="14" width="9" height="22" rx="2" fill="black" opacity="0.5"/></svg>',
+      funnel: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 40" fill="none"><rect x="2" y="2" width="56" height="9" rx="1" fill="black"/><rect x="10.5" y="15.5" width="39" height="9" rx="1" fill="black" opacity="0.65"/><rect x="18.5" y="29" width="23" height="9" rx="1" fill="black" opacity="0.4"/></svg>',
+      tree: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 40" fill="none"><line x1="0" y1="4" x2="8" y2="4" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="12" x2="8" y2="12" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="20" x2="8" y2="20" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="28" x2="8" y2="28" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="36" x2="8" y2="36" stroke="black" stroke-width="2" opacity="0.5"/><path d="M8 4C24 4 24 14 40 14" stroke="black" stroke-width="1.3" opacity="0.4"/><path d="M8 12C24 12 24 14 40 14" stroke="black" stroke-width="1.3" opacity="0.4"/><path d="M8 20C24 20 24 14 40 14" stroke="black" stroke-width="1.3" opacity="0.5"/><path d="M8 28C24 28 24 30 40 30" stroke="black" stroke-width="1.3" opacity="0.4"/><path d="M8 36C24 36 24 30 40 30" stroke="black" stroke-width="1.3" opacity="0.4"/><circle cx="40" cy="14" r="6" fill="black"/><circle cx="40" cy="30" r="4" fill="black" opacity="0.6"/></svg>',
+      network: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" fill="none"><line x1="22" y1="22" x2="6" y2="8" stroke="black" stroke-width="1.4" opacity="0.5"/><line x1="22" y1="22" x2="38" y2="8" stroke="black" stroke-width="1.4" opacity="0.5"/><line x1="22" y1="22" x2="8" y2="34" stroke="black" stroke-width="1.4" opacity="0.5"/><line x1="22" y1="22" x2="36" y2="36" stroke="black" stroke-width="1.4" opacity="0.5"/><line x1="22" y1="22" x2="22" y2="4" stroke="black" stroke-width="1.4" opacity="0.5"/><circle cx="22" cy="22" r="8" fill="black"/><circle cx="6" cy="8" r="4" fill="black" opacity="0.6"/><circle cx="38" cy="8" r="3" fill="black" opacity="0.45"/><circle cx="8" cy="34" r="3.5" fill="black" opacity="0.5"/><circle cx="36" cy="36" r="4" fill="black" opacity="0.6"/><circle cx="22" cy="4" r="3" fill="black" opacity="0.45"/></svg>',
+      petals: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" fill="none"><path d="M22 22L22 3A19 19 0 0 1 39.5 15Z" fill="black"/><path d="M22 22L39.5 15A19 19 0 0 1 33 39Z" fill="black" opacity="0.7"/><path d="M22 22L33 39A19 19 0 0 1 11 39Z" fill="black" opacity="0.25"/><path d="M22 22L11 39A19 19 0 0 1 4.5 15Z" fill="black" opacity="0.45"/><path d="M22 22L4.5 15A19 19 0 0 1 22 3Z" fill="black" opacity="0.25"/></svg>',
+    }
+    const chartLabels = {
+      vertical: 'Vertical', horizontal: 'Horizontal', line: 'Line',
+      grouped: 'Grouped', radar: 'Radar',
+      pie: 'Pie', donut: 'Donut', progress: 'Progress', timeline: 'Timeline', budget: 'Budget', table: 'Table',
+      kpi: 'KPI', funnel: 'Funnel', network: 'Network', petals: 'Petals', tree: 'Tree',
+    }
+    const chartTypeOrder = ['vertical', 'horizontal', 'line', 'grouped', 'radar', 'pie', 'donut', 'progress', 'timeline', 'funnel', 'budget', 'table', 'kpi', 'network', 'petals', 'tree']
+    const grid = document.getElementById('chartTypeGrid')
+    chartTypeOrder.forEach((type, idx) => {
+      const btn = document.createElement('button')
+      btn.className = 'chart-type-btn' + (idx === 0 ? ' selected' : '')
+      btn.dataset.type = type
+      const img = document.createElement('img')
+      img.src = 'data:image/svg+xml,' + chartIcons[type]
+      img.alt = chartLabels[type]
+      const label = document.createElement('span')
+      label.textContent = chartLabels[type]
+      btn.appendChild(img)
+      btn.appendChild(label)
+      grid.appendChild(btn)
+    })
+
+    let lastReportedHeight = 0
+    let resizeRaf = 0
+    let currentChartType = 'vertical'
+
+    // Manual panel resize (drag the right edge, bottom edge, or corner). manualMinHeight is
+    // the floor set by dragging the bottom/corner handle, so later content-driven
+    // auto-height (below) can still grow the panel but never snaps it back below what the
+    // user chose. Width has no equivalent manual floor — see autoFitWidth further down,
+    // which grows it (only ever grows, never shrinks) whenever content would otherwise be
+    // cut off, independent of anything the user dragged.
+    const MIN_UI_W = 320, MAX_UI_W = 780
+    const MIN_UI_H = 200, MAX_UI_H = 900
+    let uiWidth = 420
+    let manualMinHeight = 0
+
+    function requestUIResize(width, height) {
+      uiWidth = Math.max(MIN_UI_W, Math.min(MAX_UI_W, Math.round(width)))
+      const h = Math.max(MIN_UI_H, Math.min(MAX_UI_H, Math.round(height)))
+      parent.postMessage({ pluginMessage: { type: 'resize', width: uiWidth, height: h } }, '*')
+    }
+
+    // Plain window-level mousemove/mouseup stop firing the instant the cursor leaves the
+    // iframe's current bounds — which happens almost immediately when growing the panel,
+    // since the actual resize only lands after a round-trip to the plugin's main thread.
+    // Pointer capture keeps every subsequent pointer event routed to the handle itself
+    // regardless of what's visually under the cursor, so the drag keeps tracking.
+    function startPanelDrag(mode) {
+      return (downEvent) => {
+        downEvent.preventDefault()
+        const handle = downEvent.currentTarget
+        try { handle.setPointerCapture(downEvent.pointerId) } catch (e) {}
+        const startX = downEvent.clientX, startY = downEvent.clientY
+        const startW = uiWidth, startH = lastReportedHeight || 680
+        function onMove(moveEvent) {
+          let w = startW, h = startH
+          if (mode === 'right' || mode === 'corner') w = startW + (moveEvent.clientX - startX)
+          if (mode === 'bottom' || mode === 'corner') h = startH + (moveEvent.clientY - startY)
+          if (mode !== 'right') manualMinHeight = Math.max(MIN_UI_H, Math.min(MAX_UI_H, Math.round(h)))
+          requestUIResize(w, h)
+        }
+        function onUp(upEvent) {
+          try { handle.releasePointerCapture(upEvent.pointerId) } catch (e) {}
+          handle.removeEventListener('pointermove', onMove)
+          handle.removeEventListener('pointerup', onUp)
+        }
+        handle.addEventListener('pointermove', onMove)
+        handle.addEventListener('pointerup', onUp)
+      }
+    }
+
+    document.getElementById('resizeRight').addEventListener('pointerdown', startPanelDrag('right'))
+    document.getElementById('resizeBottom').addEventListener('pointerdown', startPanelDrag('bottom'))
+    document.getElementById('resizeCorner').addEventListener('pointerdown', startPanelDrag('corner'))
+
+    // Number of value columns per data row: fixed at 1 for single-value charts, adjustable
+    // via the "+"/"×" on the column headers for these three. What a "row" means differs per
+    // type: for grouped/progress a row is a category with N series to compare; for line a
+    // row is a whole line (its label is the line's name, in the legend) and each value
+    // column is one sequential point along the shared x-axis.
+    const MIN_SERIES = 2
+    const MAX_SERIES = 6
+    // "line" points aren't compared side by side like series/categories are — a line chart
+    // commonly needs many more data points (a year of months, etc.), so it gets a much
+    // higher ceiling than grouped/progress.
+    const MAX_SERIES_LINE = 30
+    const MULTI_SERIES_TYPES = ['line', 'grouped', 'progress']
+    let seriesCount = 2
+
+    function getMaxSeries() {
+      return currentChartType === 'line' ? MAX_SERIES_LINE : MAX_SERIES
+    }
+
+    // Timeline has its own dedicated Phase/Subtask accordion editor (see timelinePhases
+    // below) rather than going through the generic row list, so it needs no entry here.
+    // KPI's Value/Description are a fixed pair (not addable/removable, like Timeline's fixed
+    // Start/End/Phase), not a comparison series.
+    function getValueColumnCount() {
+      if (currentChartType === 'table') return Math.max(1, tableColumnNames.length - 1)
+      if (currentChartType === 'kpi') return 2
+      return MULTI_SERIES_TYPES.includes(currentChartType) ? seriesCount : 1
+    }
+
+    function defaultValues() {
+      if (currentChartType === 'table' || currentChartType === 'kpi' || currentChartType === 'tree') return new Array(getValueColumnCount()).fill('')
+      return new Array(getValueColumnCount()).fill('0')
+    }
+
+    // Custom date-range picker — replaces native <input type="date"> for Timeline's
+    // Start/End fields. The native calendar popup can't be restyled (no CSS hook into its
+    // internals, so there's no way to control which day it marks as "today" or to add a
+    // Start→End range highlight), so this is a from-scratch calendar instead: click a day to
+    // set Start, click a later day to set End (auto-commits), with a light band connecting
+    // them and a thin outline (not a fill) marking today so it never reads as a selection.
+    // One shared popover instance is reused for every row rather than building one per row.
+    const MONTH_ABBR_UI = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    const MONTH_FULL_UI = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+    function isoDateUI(d) {
+      const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0')
+      return y + '-' + m + '-' + day
+    }
+    function formatDatePillPart(iso) {
+      if (!iso) return null
+      const d = new Date(iso + 'T00:00:00')
+      if (isNaN(d.getTime())) return null
+      return d.getDate() + ' ' + MONTH_ABBR_UI[d.getMonth()]
+    }
+    function formatDateRangeLabel(start, end) {
+      const s = formatDatePillPart(start), e = formatDatePillPart(end)
+      if (s && e) return s === e ? s : s + ' – ' + e
+      if (s) return s + ' – …'
+      return 'Set dates'
+    }
+
+    let dateRangeOnChange = null
+    let dpViewYear = 0, dpViewMonth = 0
+    let dpPendingStart = '', dpPendingEnd = ''
+
+    function renderDpGrid() {
+      const grid = document.getElementById('dpGrid')
+      grid.innerHTML = ''
+      const firstDow = (new Date(dpViewYear, dpViewMonth, 1).getDay() + 6) % 7 // 0 = Monday
+      const gridStart = new Date(dpViewYear, dpViewMonth, 1 - firstDow)
+      const todayIso = isoDateUI(new Date())
+      for (let i = 0; i < 42; i++) {
+        const d = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i)
+        const iso = isoDateUI(d)
+        const cell = document.createElement('button')
+        cell.type = 'button'
+        cell.className = 'dp-cell'
+        if (d.getMonth() !== dpViewMonth) cell.classList.add('dp-other-month')
+        if (iso === todayIso) cell.classList.add('dp-today')
+        if (dpPendingStart && iso === dpPendingStart) cell.classList.add('dp-range-start')
+        if (dpPendingEnd && iso === dpPendingEnd) cell.classList.add('dp-range-end')
+        if (dpPendingStart && dpPendingEnd && iso > dpPendingStart && iso < dpPendingEnd) cell.classList.add('dp-range-mid')
+        const num = document.createElement('span')
+        num.className = 'dp-day-num'
+        num.textContent = String(d.getDate())
+        cell.appendChild(num)
+        cell.addEventListener('click', () => onDpDayClick(iso))
+        grid.appendChild(cell)
+      }
+      document.getElementById('dpMonthLabel').textContent = MONTH_FULL_UI[dpViewMonth] + ' ' + dpViewYear
+    }
+
+    function onDpDayClick(iso) {
+      if (!dpPendingStart || (dpPendingStart && dpPendingEnd)) {
+        // Nothing picked yet, or a previous range was already complete — start fresh.
+        dpPendingStart = iso
+        dpPendingEnd = ''
+        renderDpGrid()
+      } else if (iso < dpPendingStart) {
+        // Picked before the current start — that's the new start instead.
+        dpPendingStart = iso
+        dpPendingEnd = ''
+        renderDpGrid()
+      } else {
+        // Completes the range — commit immediately, no separate confirm step needed.
+        dpPendingEnd = iso
+        commitDateRange()
+      }
+    }
+
+    function commitDateRange() {
+      if (dateRangeOnChange) dateRangeOnChange(dpPendingStart, dpPendingEnd || dpPendingStart)
+      closeDateRangePopover()
+    }
+
+    function dpOutsideClickHandler(e) {
+      const popover = document.getElementById('dateRangePopover')
+      if (!popover.contains(e.target)) closeDateRangePopover()
+    }
+
+    function closeDateRangePopover() {
+      const popover = document.getElementById('dateRangePopover')
+      if (popover.style.display === 'none') return
+      popover.style.display = 'none'
+      document.removeEventListener('mousedown', dpOutsideClickHandler)
+      dateRangeOnChange = null
+    }
+
+    function positionDpPopover(anchorEl) {
+      const popover = document.getElementById('dateRangePopover')
+      const r = anchorEl.getBoundingClientRect()
+      const pw = 272, ph = 340
+      let top = r.bottom + 6
+      let left = r.left
+      if (left + pw > window.innerWidth) left = Math.max(4, window.innerWidth - pw - 4)
+      if (top + ph > window.innerHeight) top = Math.max(4, r.top - ph - 6)
+      popover.style.top = top + 'px'
+      popover.style.left = left + 'px'
+    }
+
+    // onChange(start, end) is called once the range is committed (second day clicked, or
+    // Clear/Done pressed) — the caller writes it back into its own phase/task object and
+    // re-renders.
+    function openDateRangePopover(anchorEl, start, end, onChange) {
+      dateRangeOnChange = onChange
+      dpPendingStart = start || ''
+      dpPendingEnd = end || ''
+      const base = dpPendingStart ? new Date(dpPendingStart + 'T00:00:00') : new Date()
+      dpViewYear = base.getFullYear()
+      dpViewMonth = base.getMonth()
+      renderDpGrid()
+      const popover = document.getElementById('dateRangePopover')
+      popover.style.display = 'block'
+      positionDpPopover(anchorEl)
+      setTimeout(() => { document.addEventListener('mousedown', dpOutsideClickHandler) }, 0)
+    }
+
+    document.getElementById('dpPrevMonth').addEventListener('click', () => {
+      dpViewMonth--; if (dpViewMonth < 0) { dpViewMonth = 11; dpViewYear-- }
+      renderDpGrid()
+    })
+    document.getElementById('dpNextMonth').addEventListener('click', () => {
+      dpViewMonth++; if (dpViewMonth > 11) { dpViewMonth = 0; dpViewYear++ }
+      renderDpGrid()
+    })
+    document.getElementById('dpClear').addEventListener('click', () => {
+      dpPendingStart = ''; dpPendingEnd = ''
+      if (dateRangeOnChange) dateRangeOnChange('', '')
+      closeDateRangePopover()
+    })
+    document.getElementById('dpDone').addEventListener('click', () => {
+      if (dpPendingStart) commitDateRange()
+      else closeDateRangePopover()
+    })
+
+    // Timeline: a nested accordion — a phase has its own label/dates and a list of
+    // subtasks, each with their own label/dates. The Phase-vs-Task distinction that used to
+    // be a checkbox is now structural: an entry is a phase, or it's a subtask nested inside
+    // one — there's nothing to toggle. Still serialized to the same flat comma/pipe wire
+    // format every other chart type uses (reusing parseDataString/collectDataString's
+    // shape), just with an explicit 'phase'/'task' token in the 3rd slot instead of a
+    // boolean flag, and grouping tasks under whichever phase entry precedes them.
+    let timelinePhases = []
+    function newTimelinePhase() {
+      return { label: 'Phase ' + (timelinePhases.length + 1), start: '', end: '', tasks: [], collapsed: false }
+    }
+
+    function addTimelinePhase() {
+      timelinePhases.push(newTimelinePhase())
+      renderTimelineTree()
+      const cards = document.querySelectorAll('.tl-phase-card')
+      const last = cards[cards.length - 1]
+      if (last) { const inp = last.querySelector('.tl-phase-label'); if (inp) inp.focus() }
+    }
+
+    function renderTimelineTree() {
+      const container = document.getElementById('timeline-tree')
+      if (!container) return
+      // The tree gets fully rebuilt below, so any row a popover is currently editing could
+      // vanish mid-edit (e.g. its phase/task just got deleted) — closing unconditionally is
+      // simpler and safer than trying to track which renders are safe to leave it open for.
+      closeDateRangePopover()
+      container.innerHTML = ''
+      timelinePhases.forEach((phase, pIdx) => {
+        const card = document.createElement('div')
+        card.className = 'tl-phase-card'
+
+        const header = document.createElement('div')
+        header.className = 'tl-phase-header'
+
+        const toggleBtn = document.createElement('button')
+        toggleBtn.type = 'button'
+        toggleBtn.className = 'tl-collapse-btn'
+        toggleBtn.textContent = phase.collapsed ? '▸' : '▾'
+        toggleBtn.title = phase.collapsed ? 'Expand' : 'Collapse'
+        toggleBtn.addEventListener('click', () => { phase.collapsed = !phase.collapsed; renderTimelineTree() })
+        header.appendChild(toggleBtn)
+
+        const labelInput = document.createElement('input')
+        labelInput.type = 'text'
+        labelInput.className = 'tl-phase-label'
+        labelInput.value = phase.label
+        labelInput.placeholder = 'Phase ' + (pIdx + 1)
+        labelInput.addEventListener('input', () => { phase.label = labelInput.value })
+        header.appendChild(labelInput)
+
+        const dateBtn = document.createElement('button')
+        dateBtn.type = 'button'
+        dateBtn.className = 'tl-date-range-btn' + (phase.start ? '' : ' placeholder')
+        dateBtn.textContent = formatDateRangeLabel(phase.start, phase.end)
+        dateBtn.addEventListener('click', (e) => {
+          openDateRangePopover(e.currentTarget, phase.start, phase.end, (start, end) => {
+            phase.start = start; phase.end = end; renderTimelineTree(); reportHeight()
+          })
+        })
+        header.appendChild(dateBtn)
+
+        const delBtn = document.createElement('button')
+        delBtn.type = 'button'
+        delBtn.className = 'block-delete'
+        delBtn.innerHTML = deleteSvg
+        delBtn.title = 'Remove phase'
+        delBtn.addEventListener('click', () => {
+          timelinePhases.splice(pIdx, 1)
+          // Never leave the tree empty — always keep at least one phase.
+          if (!timelinePhases.length) timelinePhases.push(newTimelinePhase())
+          renderTimelineTree()
+          reportHeight()
+        })
+        header.appendChild(delBtn)
+
+        card.appendChild(header)
+
+        if (!phase.collapsed) {
+          const taskList = document.createElement('div')
+          taskList.className = 'tl-task-list'
+          phase.tasks.forEach((task, tIdx) => {
+            const row = document.createElement('div')
+            row.className = 'tl-task-row'
+
+            const tLabel = document.createElement('input')
+            tLabel.type = 'text'
+            tLabel.className = 'tl-task-label'
+            tLabel.value = task.label
+            tLabel.placeholder = 'Subtask ' + (tIdx + 1)
+            tLabel.addEventListener('input', () => { task.label = tLabel.value })
+            row.appendChild(tLabel)
+
+            const tDateBtn = document.createElement('button')
+            tDateBtn.type = 'button'
+            tDateBtn.className = 'tl-date-range-btn' + (task.start ? '' : ' placeholder')
+            tDateBtn.textContent = formatDateRangeLabel(task.start, task.end)
+            tDateBtn.addEventListener('click', (e) => {
+              openDateRangePopover(e.currentTarget, task.start, task.end, (start, end) => {
+                task.start = start; task.end = end; renderTimelineTree(); reportHeight()
+              })
+            })
+            row.appendChild(tDateBtn)
+
+            const tDel = document.createElement('button')
+            tDel.type = 'button'
+            tDel.className = 'block-delete'
+            tDel.innerHTML = deleteSvg
+            tDel.title = 'Remove subtask'
+            tDel.addEventListener('click', () => {
+              phase.tasks.splice(tIdx, 1)
+              renderTimelineTree()
+              reportHeight()
+            })
+            row.appendChild(tDel)
+
+            taskList.appendChild(row)
+          })
+
+          const addTaskBtn = document.createElement('button')
+          addTaskBtn.type = 'button'
+          addTaskBtn.className = 'add-btn tl-add-task'
+          addTaskBtn.textContent = '+ Add subtask'
+          addTaskBtn.addEventListener('click', () => {
+            phase.tasks.push({ label: 'Subtask ' + (phase.tasks.length + 1), start: '', end: '' })
+            renderTimelineTree()
+            reportHeight()
+            const rows = card.querySelectorAll('.tl-task-row')
+            const lastRow = rows[rows.length - 1]
+            if (lastRow) { const inp = lastRow.querySelector('.tl-task-label'); if (inp) inp.focus() }
+          })
+          taskList.appendChild(addTaskBtn)
+          card.appendChild(taskList)
+        }
+
+        container.appendChild(card)
+      })
+      reportHeight()
+    }
+
+    // Serialized as tab-separated cells (label / start / end / type) per newline-separated
+    // row, in tree order (each phase immediately followed by its own subtasks) — NOT the
+    // shared comma/colon/pipe format the other chart types use, because a typed task label
+    // routinely contains a literal comma or colon ("Benchmark, análisis: competencia."),
+    // which would otherwise get misread as a row or field boundary (the exact bug this
+    // format already had to avoid for Table's free-text cells). Grouping on the way back in
+    // (setTimelineDataFromString) is inferred the same way: a task row joins whichever phase
+    // row came before it.
+    function collectTimelineDataString() {
+      const rows = []
+      timelinePhases.forEach(phase => {
+        if (phase.label.trim() || phase.start || phase.end) {
+          rows.push([phase.label.trim(), phase.start || '', phase.end || '', 'phase'].join('\t'))
+        }
+        phase.tasks.forEach(task => {
+          if (task.label.trim() || task.start || task.end) {
+            rows.push([task.label.trim(), task.start || '', task.end || '', 'task'].join('\t'))
+          }
+        })
+      })
+      return rows.join('\n')
+    }
+
+    function setTimelineDataFromString(str) {
+      timelinePhases = []
+      let current = null
+      for (const line of String(str || '').split('\n')) {
+        if (!line.trim()) continue
+        const cells = line.split('\t')
+        const label = cells[0] || ''
+        const start = cells[1] || ''
+        const end = cells[2] || ''
+        const isPhase = cells[3] === 'phase'
+        if (isPhase) {
+          current = { label, start, end, tasks: [], collapsed: false }
+          timelinePhases.push(current)
+        } else {
+          // A task with no preceding phase (e.g. data from before this accordion existed) —
+          // wrap it in a synthetic leading phase instead of dropping it.
+          if (!current) { current = { label: '', start: '', end: '', tasks: [], collapsed: false }; timelinePhases.push(current) }
+          current.tasks.push({ label, start, end })
+        }
+      }
+      if (!timelinePhases.length) timelinePhases.push(newTimelinePhase())
+      renderTimelineTree()
+    }
+
+    // Table: columns are free-form and user-named (unlike the fixed S1/S2 series columns),
+    // since a table's columns can be any headers the user wants, not comparison series.
+    // Column 0 doubles as the sticky "label" input every row already has. Defaults stay
+    // abstract ("Column N" for all of them) rather than concrete example text like
+    // "Action"/"Team", so it doesn't read as pre-filled sample content to overwrite.
+    const MIN_TABLE_COLS = 2
+    const MAX_TABLE_COLS = 8
+    let tableColumnNames = ['Column 1', 'Column 2', 'Column 3']
+
+    function addTableColumn() {
+      if (tableColumnNames.length >= MAX_TABLE_COLS) return
+      tableColumnNames.push('Column ' + (tableColumnNames.length + 1))
+      const currentData = collectTableDataString()
+      updateColumnLabels()
+      setTableDataFromString(currentData)
+      reportHeight()
+    }
+
+    // Reads every row's cells directly (rather than through collect/setDataFromString) so
+    // the exact column being removed can be spliced out of every row, matching how
+    // removeSeriesAt handles the equivalent case for the other multi-column chart types.
+    function removeTableColumnAt(idx) {
+      if (tableColumnNames.length <= MIN_TABLE_COLS) return
+      const rows = []
+      document.querySelectorAll('#data-blocks .data-block').forEach(row => {
+        const label = row.querySelector('.block-label').value
+        const values = Array.from(row.querySelectorAll('.block-mvalue')).map(el => el.value)
+        const cells = [label, ...values]
+        cells.splice(idx, 1)
+        rows.push(cells)
+      })
+      tableColumnNames.splice(idx, 1)
+      updateColumnLabels()
+      clearBlocks()
+      for (const cells of rows) createBlock(cells[0] || '', cells.slice(1))
+      reportHeight()
+    }
+
+    function setSeriesCount(n) {
+      seriesCount = Math.max(MIN_SERIES, Math.min(getMaxSeries(), n))
+    }
+
+    // The "+" next to the column headers — also used when pressing Enter in a value cell
+    // for single-row types (line), where adding a "row" isn't possible. rowIndex (when
+    // given, from pressing Enter in a specific row's value cell) refocuses the new value
+    // cell in that same row rather than always the last one, so typing down/across stays
+    // on value cells instead of jumping back to a label.
+    function addSeries(rowIndex) {
+      const currentData = collectDataString()
+      setSeriesCount(seriesCount + 1)
+      updateColumnLabels()
+      setDataFromString(currentData)
+      const blocks = document.querySelectorAll('#data-blocks .data-block')
+      const targetBlock = (typeof rowIndex === 'number' && blocks[rowIndex]) ? blocks[rowIndex] : blocks[blocks.length - 1]
+      if (targetBlock) {
+        const values = targetBlock.querySelectorAll('.block-mvalue')
+        const lastValue = values[values.length - 1]
+        if (lastValue) lastValue.focus()
+      }
+    }
+
+    // Removes one series (0-based index) from every row, re-indexing the rest — used by
+    // the small "×" on a column header. Reads/writes the row values directly (rather than
+    // through collectDataString/setDataFromString) so empty rows aren't dropped and the
+    // splice lands on the exact column, not just "the last one".
+    function removeSeriesAt(idx) {
+      if (seriesCount <= MIN_SERIES) return
+      const rows = []
+      document.querySelectorAll('#data-blocks .data-block').forEach(row => {
+        const label = row.querySelector('.block-label').value
+        const values = Array.from(row.querySelectorAll('.block-mvalue')).map(el => el.value)
+        values.splice(idx, 1)
+        rows.push({ label, values })
+      })
+      setSeriesCount(seriesCount - 1)
+      updateColumnLabels()
+      clearBlocks()
+      for (const r of rows) createBlock(r.label, r.values)
+      reportHeight()
+    }
+
+    function getSelectedChartType() { return currentChartType }
+
+    function selectChartType(type) {
+      const oldType = currentChartType
+      currentChartType = type
+      document.querySelectorAll('.chart-type-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.type === type)
+      })
+      document.getElementById('data-blocks').classList.toggle('table-mode', type === 'table')
+      document.getElementById('column-labels').classList.toggle('table-mode', type === 'table')
+      document.getElementById('data-blocks').classList.toggle('kpi-mode', type === 'kpi')
+      // Timeline uses its own dedicated Phase/Subtask accordion (#timeline-tree) instead of
+      // the generic row list — swap which one is visible, and the "+ Add" footer button
+      // along with it.
+      document.getElementById('genericDataScroll').style.display = (type === 'timeline') ? 'none' : ''
+      document.getElementById('timeline-tree').style.display = (type === 'timeline') ? '' : 'none'
+      document.getElementById('addEntry').textContent = (type === 'timeline') ? '+ Add Phase' : '+ Add'
+      // Any actual type change can change the value-column shape (count, or table's
+      // user-named columns vs a plain single value) — always rebuild to match.
+      if (oldType !== type) rebuildBlocksForMode()
+      document.getElementById('overlappedField').style.display = (type === 'grouped' || type === 'progress') ? '' : 'none'
+      document.getElementById('timelineFields').style.display = (type === 'timeline') ? '' : 'none'
+      document.getElementById('budgetFields').style.display = (type === 'budget') ? '' : 'none'
+    }
+
+    document.getElementById('chartTypeGrid').addEventListener('click', (e) => {
+      const btn = e.target.closest('.chart-type-btn')
+      if (btn && btn.dataset.type) selectChartType(btn.dataset.type)
+    })
+
+    function measurePanelHeight() {
+      const root = document.getElementById('plugin-root')
+      if (!root) return 0
+      // getBoundingClientRect() alone is unreliable right after expanding from collapsed:
+      // #plugin-root has height:100%, which is bounded by the iframe's CURRENT size — and
+      // the iframe is still at the old (collapsed, ~52px) size at this point, since Figma
+      // only resizes it *after* we send the resize request below, not before. scrollHeight
+      // reflects the true content height regardless of that current constraint, so taking
+      // the max of both is what lets the panel actually grow back to full size instead of
+      // getting stuck reporting its own stale, still-collapsed height.
+      let h = Math.max(Math.ceil(root.getBoundingClientRect().height), Math.ceil(root.scrollHeight))
+      const openDialog = document.querySelector('dialog.fig-fill-picker-dialog[open]')
+      if (openDialog) h = Math.max(h, Math.ceil(openDialog.getBoundingClientRect().bottom))
+      return h
+    }
+
+    function reportHeight() {
+      if (isCollapsed) return // collapsed height is forced explicitly, not content-measured
+      const measured = measurePanelHeight()
+      const h = Math.max(measured, manualMinHeight)
+      if (h && h !== lastReportedHeight) {
+        lastReportedHeight = h
+        parent.postMessage({ pluginMessage: { type: 'resize', width: uiWidth, height: h } }, '*')
+      }
+    }
+
+    // Collapse/expand: shrinks the whole panel down to just its header bar, and back.
+    // Content is hidden via CSS, but the actual iframe height is forced explicitly (the
+    // same way manual drag-resize works) rather than relying on measuring #plugin-root,
+    // since its height:100%/min-height:100vh track the iframe's own current size and
+    // wouldn't shrink on their own just because their content became shorter.
+    let isCollapsed = false
+    const COLLAPSED_HEIGHT = 52
+    function setCollapsed(collapsed) {
+      isCollapsed = collapsed
+      document.getElementById('plugin-root').classList.toggle('collapsed', collapsed)
+      const btn = document.getElementById('collapseBtn')
+      btn.innerHTML = collapsed ? '&#43;' : '&#8722;'
+      btn.title = collapsed ? 'Expand' : 'Minimize'
+      if (collapsed) {
+        lastReportedHeight = COLLAPSED_HEIGHT
+        parent.postMessage({ pluginMessage: { type: 'resize', width: uiWidth, height: COLLAPSED_HEIGHT } }, '*')
+      } else {
+        lastReportedHeight = 0
+        // Double rAF: a single class-toggle isn't guaranteed to be fully reflowed AND
+        // painted by the time a layout measurement runs in the very same tick, especially
+        // for content that was display:none a moment ago — this waits for a full paint
+        // cycle first. Also re-checks width (not just height): if the previously-selected
+        // chart type needs a wider panel than what was active before collapsing (e.g.
+        // Timeline), expanding should restore that instead of coming back too narrow.
+        requestAnimationFrame(() => requestAnimationFrame(() => { autoFitWidth(); reportHeight() }))
+      }
+    }
+    document.getElementById('collapseBtn').addEventListener('click', () => setCollapsed(!isCollapsed))
+
+    const pluginRoot = document.getElementById('plugin-root')
+    if (pluginRoot && typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(() => {
+        if (resizeRaf) cancelAnimationFrame(resizeRaf)
+        resizeRaf = requestAnimationFrame(reportHeight)
+      }).observe(pluginRoot)
+    }
+
+    // Grows the panel width when content doesn't fit — e.g. Timeline's wide Start/End/Phase
+    // columns — instead of leaving cells visibly cut off, needing a horizontal scroll just
+    // to see them. Only ever grows, never shrinks: bound to content changes (below), not to
+    // the live resize-drag itself, so dragging the panel narrower by hand still works
+    // without immediately being fought.
+    function autoFitWidth() {
+      if (isCollapsed) return
+      const scrollEl = document.querySelector('.data-scroll')
+      if (!scrollEl) return
+      const overflow = scrollEl.scrollWidth - scrollEl.clientWidth
+      if (overflow > 1) {
+        const target = Math.min(MAX_UI_W, uiWidth + overflow + 4)
+        if (target > uiWidth) requestUIResize(target, lastReportedHeight || 680)
+      }
+    }
+
+    new MutationObserver(() => {
+      if (resizeRaf) cancelAnimationFrame(resizeRaf)
+      resizeRaf = requestAnimationFrame(() => { autoFitWidth(); reportHeight() })
+    }).observe(document.body, {
+      childList: true, attributes: true, attributeFilter: ['open'], subtree: true,
+    })
+
+    function colorValue(id) {
+      const value = document.getElementById(id).value
+      const hex = String(value || '#000000FF').replace('#', '')
+      const read = (start, fallback) => {
+        const parsed = Number.parseInt(hex.slice(start, start + 2), 16)
+        return Number.isFinite(parsed) ? parsed / 255 : fallback
+      }
+      return { r: read(0, 0), g: read(2, 0), b: read(4, 0), a: hex.length >= 8 ? read(6, 1) : 1 }
+    }
+
+    function colorToHex(value) {
+      const color = typeof value === 'object' && value !== null ? value : {}
+      const ch = (c, f) => Math.round(Math.max(0, Math.min(1, Number.isFinite(Number(c)) ? Number(c) : f)) * 255).toString(16).padStart(2, '0').toUpperCase()
+      return '#' + ch(color.r, 0) + ch(color.g, 0) + ch(color.b, 0) + ch(color.a, 1)
+    }
+
+    function setControlValue(id, value) {
+      const el = document.getElementById(id)
+      if (!el) return
+      const s = String(value)
+      el.value = s
+      el.setAttribute('value', s)
+      // if a hex text field exists for color, sync it
+      if (id === 'barColor') {
+        const hexField = document.getElementById('barColorHex')
+        if (hexField) hexField.value = s
+      }
+    }
+
+    function getOverlappedValue() {
+      const el = document.getElementById('overlapped')
+      if (!el) return false
+      // prefer native checked, fallback to aria-checked
+      if ('checked' in el) return !!el.checked
+      const aria = el.getAttribute && el.getAttribute('aria-checked')
+      return aria === 'true'
+    }
+
+    function setOverlappedValue(v) {
+      const el = document.getElementById('overlapped')
+      if (!el) return
+      if ('checked' in el) el.checked = !!v
+      try { el.setAttribute('aria-checked', !!v ? 'true' : 'false') } catch {}
+    }
+
+    const deleteSvg = '<svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg>'
+
+    // KPI's label is real copy that ends up on the chart (a stat's title), not a row index —
+    // auto-filling "Label 1", "Label 2"... there just means erasing placeholder text before
+    // typing the real one every time, so it's left blank (the "Label" placeholder still
+    // shows as a hint) instead.
+    function nextDataLabel() {
+      if (currentChartType === 'kpi') return ''
+      const n = document.querySelectorAll('#data-blocks .data-block').length + 1
+      return 'Label ' + n
+    }
+
+    // Adds a new row and focuses its first cell — whichever input is leftmost/first in the
+    // row's actual DOM order, so this stays correct for KPI's reordered Value-first layout
+    // without needing a special case (every other type's first cell is still the label).
+    function addEntryRow() {
+      createBlock(nextDataLabel(), [])
+      const blocks = document.querySelectorAll('#data-blocks .data-block')
+      const lastBlock = blocks[blocks.length - 1]
+      if (!lastBlock) return
+      const firstInput = lastBlock.querySelector('input')
+      if (firstInput) firstInput.focus()
+    }
+
+    function createBlock(label, values) {
+      values = values || []
+      const container = document.getElementById('data-blocks')
+      const row = document.createElement('div')
+      row.className = 'data-block'
+      const labelInput = document.createElement('input')
+      labelInput.type = 'text'
+      labelInput.className = 'block-label'
+      labelInput.value = label
+      labelInput.placeholder = 'Label'
+
+      const count = getValueColumnCount()
+      const valueInputs = []
+      for (let i = 0; i < count; i++) {
+        const valueInput = document.createElement('input')
+        valueInput.className = 'block-mvalue'
+        valueInput.type = 'text'
+        valueInput.value = values[i] !== undefined ? values[i] : ''
+        valueInput.placeholder = (currentChartType === 'tree') ? 'Category' : '0'
+        valueInput.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return
+          e.preventDefault()
+          // Exception: in "line", a row is a whole series (added less often via + Add), so
+          // Enter adds a point to the current line instead of a new row.
+          if (currentChartType === 'line') {
+            const rowIndex = Array.from(document.querySelectorAll('#data-blocks .data-block')).indexOf(row)
+            addSeries(rowIndex)
+          } else {
+            addEntryRow()
+          }
+        })
+        valueInputs.push(valueInput)
+      }
+
+      if (currentChartType === 'kpi' && valueInputs.length) {
+        // Visual order Value, Label, Description — the stored cell order (read by CSS
+        // class, not DOM position, in collectTableDataString) stays label-first regardless.
+        row.appendChild(valueInputs[0])
+        row.appendChild(labelInput)
+        for (let i = 1; i < valueInputs.length; i++) row.appendChild(valueInputs[i])
+      } else {
+        row.appendChild(labelInput)
+        valueInputs.forEach(v => row.appendChild(v))
+      }
+
+      const deleteBtn = document.createElement('button')
+      deleteBtn.className = 'block-delete'
+      deleteBtn.innerHTML = deleteSvg
+      deleteBtn.title = 'Remove entry'
+      deleteBtn.addEventListener('click', () => {
+        row.remove()
+        // Never leave the data entries empty — always keep at least one row.
+        if (!document.querySelector('#data-blocks .data-block')) createBlock(nextDataLabel(), defaultValues())
+        reportHeight()
+      })
+      row.appendChild(deleteBtn)
+      container.appendChild(row)
+      reportHeight()
+    }
+
+    function clearBlocks() { document.getElementById('data-blocks').innerHTML = '' }
+
+    // Short enough to never wrap in a narrow column, even with 6 of them side by side.
+    // The full name still shows as a tooltip (see updateColumnLabels). "V" (Value)
+    // uniformly across every multi-series type — grouped/line/progress-overflow all used to
+    // disagree (S1/S2 vs V1/V2), which read as an arbitrary inconsistency rather than a
+    // meaningful distinction.
+    function seriesColumnName(i) {
+      if (currentChartType === 'progress') {
+        if (i === 1) return 'Current'
+        if (i === 2) return 'Previous'
+      }
+      return 'V' + i
+    }
+
+    function seriesColumnFullName(i) {
+      if (currentChartType === 'progress' && (i === 1 || i === 2)) return seriesColumnName(i)
+      return 'Value ' + i
+    }
+
+    function updateColumnLabels() {
+      const colLabels = document.getElementById('column-labels')
+      // Timeline's #column-labels stays hidden (its own accordion has no shared header row).
+      if (currentChartType === 'timeline') return
+      if (MULTI_SERIES_TYPES.includes(currentChartType)) {
+        const canRemove = seriesCount > MIN_SERIES
+        let html = '<span class="col-label">Label</span>'
+        for (let i = 1; i <= seriesCount; i++) {
+          html += '<span class="col-value" title="' + seriesColumnFullName(i) + '">' + seriesColumnName(i)
+          if (canRemove) html += '<button type="button" class="col-series-remove" data-idx="' + (i - 1) + '" title="Remove column">×</button>'
+          html += '</span>'
+        }
+        html += '<button type="button" class="col-add-series" id="addSeriesBtn" title="Add column">+</button>'
+        colLabels.innerHTML = html
+        document.getElementById('addSeriesBtn').addEventListener('click', addSeries)
+        colLabels.querySelectorAll('.col-series-remove').forEach(btn => {
+          btn.addEventListener('click', () => removeSeriesAt(Number(btn.dataset.idx)))
+        })
+      } else if (currentChartType === 'budget') {
+        colLabels.innerHTML = '<span class="col-label">Service</span><span class="col-value">Price</span><span class="col-spacer"></span>'
+      } else if (currentChartType === 'table') {
+        // Built via DOM calls (not innerHTML string interpolation) so user-typed column
+        // names never need HTML-escaping to render safely.
+        const canRemove = tableColumnNames.length > MIN_TABLE_COLS
+        colLabels.innerHTML = ''
+        tableColumnNames.forEach((name, i) => {
+          const span = document.createElement('span')
+          span.className = i === 0 ? 'col-label' : 'col-value'
+          span.style.display = 'flex'
+          span.style.alignItems = 'center'
+          span.style.gap = '2px'
+          const input = document.createElement('input')
+          input.type = 'text'
+          input.className = 'col-name-input'
+          input.value = name
+          input.placeholder = 'Column ' + (i + 1)
+          // Border/background are governed by the .col-name-input CSS rule (dashed
+          // underline, solidifies + tints on hover/focus) — the editable-field affordance
+          // this element needs, which a plain inline border:none couldn't provide.
+          input.style.cssText = 'width:100%;min-width:40px;font-size:12px;color:#6B7280;padding:2px 0 4px 0'
+          input.addEventListener('input', () => { tableColumnNames[i] = input.value })
+          span.appendChild(input)
+          if (canRemove) {
+            const rm = document.createElement('button')
+            rm.type = 'button'
+            rm.className = 'col-series-remove'
+            rm.title = 'Remove column'
+            rm.textContent = '×'
+            rm.addEventListener('click', () => removeTableColumnAt(i))
+            span.appendChild(rm)
+          }
+          colLabels.appendChild(span)
+        })
+        const addBtn = document.createElement('button')
+        addBtn.type = 'button'
+        addBtn.className = 'col-add-series'
+        addBtn.title = 'Add column'
+        addBtn.textContent = '+'
+        addBtn.addEventListener('click', addTableColumn)
+        colLabels.appendChild(addBtn)
+      } else if (currentChartType === 'tree') {
+        colLabels.innerHTML = '<span class="col-label">Item</span><span class="col-value">Category</span><span class="col-spacer"></span>'
+      } else if (currentChartType === 'kpi') {
+        // Visual order matches the row order below (Value, Label, Description) — the
+        // underlying stored cell order stays label/value/description regardless (see
+        // collectTableDataString), so this is purely a display convention for KPI.
+        colLabels.innerHTML = '<span class="col-value">Value</span><span class="col-label">Label</span><span class="col-value">Description</span><span class="col-spacer"></span>'
+      } else {
+        colLabels.innerHTML = '<span class="col-label">Label</span><span class="col-value">Value</span><span class="col-spacer"></span>'
+      }
+    }
+
+    function parseDataString(str) {
+      const entries = []
+      for (const part of str.split(',')) {
+        const trimmed = part.trim()
+        if (!trimmed) continue
+        const colonIdx = trimmed.indexOf(':')
+        if (colonIdx > 0) {
+          const label = trimmed.slice(0, colonIdx).trim()
+          const valPart = trimmed.slice(colonIdx + 1).trim()
+          entries.push({ label: label, values: valPart.split('|').map(v => v.trim()) })
+        } else {
+          entries.push({ label: String(entries.length + 1), values: trimmed.split('|').map(v => v.trim()) })
+        }
+      }
+      return entries
+    }
+
+    // Table cells hold free-text sentences that routinely contain literal commas, colons and
+    // periods (see the reference design), so the shared comma/colon/pipe wire format used by
+    // every other chart type is unsafe here — table data is serialized as tab-separated cells
+    // per newline-separated row instead, which nothing a user types is likely to collide with.
+    function collectTableDataString() {
+      const rows = []
+      for (const row of document.querySelectorAll('#data-blocks .data-block')) {
+        const label = row.querySelector('.block-label').value
+        const values = Array.from(row.querySelectorAll('.block-mvalue')).map(el => el.value)
+        const cells = [label, ...values]
+        if (!cells.some(v => v && v.trim())) continue
+        rows.push(cells.join('\t'))
+      }
+      return rows.join('\n')
+    }
+
+    function setTableDataFromString(str) {
+      clearBlocks()
+      const lines = String(str || '').split('\n').filter(l => l.length > 0)
+      for (const line of lines) {
+        const cells = line.split('\t')
+        createBlock(cells[0] || '', cells.slice(1))
+      }
+      // Never leave the data entries empty — always keep at least one row.
+      if (!lines.length) createBlock('', defaultValues())
+    }
+
+    // opts.adoptSeriesCount: when loading data from an external source (an existing chart
+    // being edited, or an incoming message) rather than rebuilding after a local UI change,
+    // adopt whatever series count that data actually has instead of the current stepper value.
+    function setDataFromString(str, opts) {
+      if (currentChartType === 'table' || currentChartType === 'kpi' || currentChartType === 'tree') { setTableDataFromString(str); return }
+      if (currentChartType === 'timeline') { setTimelineDataFromString(str); return }
+      opts = opts || {}
+      const entries = parseDataString(str)
+      if (opts.adoptSeriesCount && MULTI_SERIES_TYPES.includes(currentChartType)) {
+        const maxLen = entries.length ? Math.max(MIN_SERIES, ...entries.map(e => e.values.length)) : MIN_SERIES
+        setSeriesCount(maxLen)
+        updateColumnLabels()
+      }
+      clearBlocks()
+      for (const e of entries) createBlock(e.label, e.values)
+      // Never leave the data entries empty — always keep at least one row.
+      if (!entries.length) createBlock(nextDataLabel(), defaultValues())
+    }
+
+    function collectDataString() {
+      // Table/KPI/Tree go through the shared tab/newline-safe collector instead of the
+      // comma-based format below — needed since a title is short but commonly has an
+      // internal comma ("Investigación, diseño y testing"), which that comma-based format
+      // would misread as two rows.
+      if (currentChartType === 'table' || currentChartType === 'kpi' || currentChartType === 'tree') return collectTableDataString()
+      if (currentChartType === 'timeline') return collectTimelineDataString()
+      const parts = []
+      for (const row of document.querySelectorAll('#data-blocks .data-block')) {
+        const label = row.querySelector('.block-label').value.trim()
+        const values = Array.from(row.querySelectorAll('.block-mvalue')).map(el => el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value.trim())
+        if (!values.some(v => !!v)) continue
+        parts.push(label ? label + ': ' + values.join(' | ') : values.join(' | '))
+      }
+      return parts.join(', ')
+    }
+
+    function rebuildBlocksForMode() {
+      const currentData = collectDataString()
+      updateColumnLabels()
+      setDataFromString(currentData)
+    }
+
+
+    document.getElementById('addEntry').addEventListener('click', () => {
+      if (currentChartType === 'timeline') addTimelinePhase()
+      else addEntryRow()
+    })
+
+    // sync color hex textbox with color picker
+    const colorPicker = document.getElementById('barColor')
+    const colorHex = document.getElementById('barColorHex')
+    if (colorPicker && colorHex) {
+      colorPicker.addEventListener('input', () => { colorHex.value = colorPicker.value; reportHeight() })
+      colorHex.addEventListener('change', () => {
+        const v = colorHex.value.trim()
+        if (/^#?[0-9A-Fa-f]{6}$/.test(v)) {
+          colorPicker.value = v.startsWith('#') ? v : '#' + v
+        }
+        reportHeight()
+      })
+    }
+
+    // Color mode: "Positive" (light theme: white background, red chart elements),
+    // "Negative" (dark theme: black background, white chart elements), or a custom
+    // accent color on a light background.
+    const POSITIVE_COLOR = '#D61526'
+    const NEGATIVE_COLOR = '#FFFFFF'
+    const colorModeGroup = document.getElementById('colorModeGroup')
+    const customColorRow = document.getElementById('customColorRow')
+    let currentTheme = 'light'
+
+    function setColorMode(mode, opts) {
+      opts = opts || {}
+      colorModeGroup.querySelectorAll('.color-mode-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.mode === mode)
+      })
+      customColorRow.style.display = mode === 'custom' ? 'flex' : 'none'
+      currentTheme = mode === 'negative' ? 'dark' : 'light'
+      if (mode === 'positive') setControlValue('barColor', POSITIVE_COLOR)
+      else if (mode === 'negative') setControlValue('barColor', NEGATIVE_COLOR)
+      else if (mode === 'custom' && !opts.keepColor) setControlValue('barColor', POSITIVE_COLOR)
+      if (!opts.silent) reportHeight()
+    }
+
+    function colorModeForHex(hex, theme) {
+      if (theme === 'dark') return 'negative'
+      const v = '#' + String(hex || '').replace('#', '').toUpperCase()
+      if (v === POSITIVE_COLOR) return 'positive'
+      return 'custom'
+    }
+
+    colorModeGroup.addEventListener('click', (e) => {
+      const btn = e.target.closest('.color-mode-btn')
+      if (btn && btn.dataset.mode) setColorMode(btn.dataset.mode)
+    })
+
+    // Timeline-only: granularity controls how many sub-columns each month is split into
+    // (weekly=4, biweekly=2, monthly=1 — handled entirely on the code.ts side).
+    const granularityGroup = document.getElementById('granularityGroup')
+    let currentGranularity = 'biweekly'
+    function setGranularity(mode, opts) {
+      opts = opts || {}
+      currentGranularity = mode
+      granularityGroup.querySelectorAll('.color-mode-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.mode === mode)
+      })
+      if (!opts.silent) reportHeight()
+    }
+    granularityGroup.addEventListener('click', (e) => {
+      const btn = e.target.closest('.color-mode-btn')
+      if (btn && btn.dataset.mode) setGranularity(btn.dataset.mode)
+    })
+    setGranularity('biweekly', { silent: true })
+
+    // Budget-only: "Sin IVA" (default) shows every price as entered, pre-VAT, with an
+    // optional secondary "Mostrar total con IVA" line — only relevant while VAT itself is
+    // excluded, hence hidden once "Con IVA" is selected. "Con IVA" applies VAT everywhere a
+    // price shows up (each line item's own price, and TOTAL), not just a footnote detail.
+    const vatModeGroup = document.getElementById('vatModeGroup')
+    let currentVatMode = 'excluded'
+    function setVatMode(mode, opts) {
+      opts = opts || {}
+      currentVatMode = mode
+      vatModeGroup.querySelectorAll('.color-mode-btn').forEach(btn => {
+        btn.classList.toggle('selected', btn.dataset.mode === mode)
+      })
+      const excluded = mode === 'excluded'
+      document.getElementById('vatShowTotalField').style.display = excluded ? '' : 'none'
+      if (!excluded) document.getElementById('vatShowTotal').checked = false
+      if (!opts.silent) reportHeight()
+    }
+    vatModeGroup.addEventListener('click', (e) => {
+      const btn = e.target.closest('.color-mode-btn')
+      if (btn && btn.dataset.mode) setVatMode(btn.dataset.mode)
+    })
+    document.getElementById('vatShowTotal').addEventListener('change', () => reportHeight())
+    setVatMode('excluded', { silent: true })
+
+
+    let editingFrameId = null
+
+    document.getElementById('go').addEventListener('click', () => {
+      parent.postMessage({
+        pluginMessage: {
+          type: 'run',
+          chartType: getSelectedChartType(),
+          data: collectDataString(),
+          barColor: colorValue('barColor'),
+          overlapped: getOverlappedValue(),
+          theme: currentTheme,
+          granularity: currentGranularity,
+          vatIncluded: currentVatMode === 'included',
+          vatShowTotal: document.getElementById('vatShowTotal').checked,
+          tableColumns: tableColumnNames.join('\t'),
+          editingFrameId: editingFrameId,
+        }
+      }, '*')
+    })
+
+    function resetToCreateMode() {
+      editingFrameId = null
+      selectChartType('vertical')
+      setColorMode('positive')
+      setOverlappedValue(false)
+      setGranularity('biweekly')
+      setVatMode('excluded')
+      document.getElementById('vatShowTotal').checked = false
+      tableColumnNames = ['Column 1', 'Column 2', 'Column 3']
+      timelinePhases = []
+      setSeriesCount(2)
+      clearBlocks()
+      createBlock(nextDataLabel(), defaultValues())
+      updateColumnLabels()
+      const btn = document.getElementById('go')
+      const label = document.getElementById('status-label')
+      btn.textContent = 'Create chart'
+      label.textContent = ''
+      reportHeight()
+    }
+
+    window.onmessage = (event) => {
+      const msg = event.data && event.data.pluginMessage
+      if (!msg) return
+      if (msg.type === 'run-complete') {
+        return
+      }
+      if (msg.type === 'params-change' && msg.params) {
+        if (msg.params.chartType !== undefined) {
+          selectChartType(msg.params.chartType)
+          updateColumnLabels()
+        }
+        if (msg.params.data !== undefined) setDataFromString(msg.params.data, { adoptSeriesCount: true })
+        if (msg.params.barColor !== undefined) {
+          const hex = colorToHex(msg.params.barColor)
+          setControlValue('barColor', hex)
+          setColorMode(colorModeForHex(hex, msg.params.theme), { keepColor: true })
+        }
+        if (msg.params.overlapped !== undefined) setOverlappedValue(!!msg.params.overlapped)
+        return
+      }
+      if (msg.type === 'set-data') {
+        if (msg.chartType !== undefined) {
+          selectChartType(msg.chartType)
+          updateColumnLabels()
+        }
+        if (msg.data !== undefined) setDataFromString(msg.data, { adoptSeriesCount: true })
+        return
+      }
+      if (msg.type === 'mode') {
+        const btn = document.getElementById('go')
+        const label = document.getElementById('status-label')
+        if (msg.editing) {
+          btn.textContent = 'Update chart'
+          label.textContent = 'Editing selected chart'
+        } else {
+          btn.textContent = 'Create chart'
+          label.textContent = ''
+        }
+        return
+      }
+      if (msg.type === 'selection') {
+        const btn = document.getElementById('go')
+        const label = document.getElementById('status-label')
+        if (msg.error) {
+          label.textContent = msg.error
+          return
+        }
+        if (!msg.params) {
+          // nothing (chart-related) selected on canvas anymore: back to create mode
+          resetToCreateMode()
+          return
+        }
+        // populate UI
+        // Column names have to land before selectChartType (which, on a type change, rebuilds
+        // the rows via rebuildBlocksForMode using whatever tableColumnNames currently holds) —
+        // otherwise the rebuild — and the setDataFromString below — would use stale/default
+        // column names instead of the ones this chart was actually saved with.
+        if (msg.params.chartType === 'table') {
+          const cols = String(msg.params.tableColumns || '').split('\t').map(c => c.trim()).filter(Boolean)
+          tableColumnNames = cols.length >= MIN_TABLE_COLS ? cols : ['Action', 'Standard timeframe', 'Team']
+        }
+        selectChartType(msg.params.chartType || 'vertical')
+        const editHex = colorToHex(msg.params.barColor || { r:0.839,g:0.082,b:0.149,a:1 })
+        setControlValue('barColor', editHex)
+        setColorMode(colorModeForHex(editHex, msg.params.theme), { keepColor: true })
+        if (msg.params.chartType === 'table') updateColumnLabels()
+        setDataFromString(msg.params.data || '', { adoptSeriesCount: true })
+        setOverlappedValue(!!msg.params.overlapped)
+        if (msg.params.granularity) setGranularity(msg.params.granularity, { silent: true })
+        setVatMode(msg.params.vatIncluded ? 'included' : 'excluded', { silent: true })
+        document.getElementById('vatShowTotal').checked = !!msg.params.vatShowTotal
+        // store editing frame id and switch UI mode
+        editingFrameId = msg.frameId
+        btn.textContent = 'Update chart'
+        label.textContent = 'Editing selected chart'
+        return
+      }
+    }
+    // Ensure there's always at least one data entry visible by default
+    if (!document.querySelector('#data-blocks .data-block')) {
+      createBlock(nextDataLabel(), defaultValues())
+    }
+    // ensure title and color hex are in sync on load
+    const cp = document.getElementById('barColor')
+    const ch = document.getElementById('barColorHex')
+    if (cp && ch) ch.value = cp.value
+    setColorMode('positive', { silent: true })
+
+    // First-run welcome screen — shown once (tracked in localStorage), reopenable anytime
+    // via the "?" button.
+    const ONBOARDING_KEY = 'dynamicCharts.onboardingSeen'
+    function showOnboarding() {
+      const el = document.getElementById('onboarding')
+      if (el) el.style.display = 'flex'
+      reportHeight()
+    }
+    function hideOnboarding() {
+      const el = document.getElementById('onboarding')
+      if (el) el.style.display = 'none'
+      reportHeight()
+    }
+    document.getElementById('onboardingDone').addEventListener('click', () => {
+      try { window.localStorage.setItem(ONBOARDING_KEY, '1') } catch (e) {}
+      hideOnboarding()
+    })
+    document.getElementById('helpBtn').addEventListener('click', showOnboarding)
+
+    let seenOnboarding = false
+    try { seenOnboarding = window.localStorage.getItem(ONBOARDING_KEY) === '1' } catch (e) {}
+    if (!seenOnboarding) showOnboarding()
+
+    reportHeight()
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "Dynamic Charts",
+  "id": "1671495039477864416",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "editorType": [
+    "figma",
+    "figjam",
+    "slides",
+    "buzz"
+  ],
+  "relaunchButtons": [
+    { "command": "1671495039477864416", "name": "Dynamic Charts" }
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ]
+  }
+}
