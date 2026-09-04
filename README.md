@@ -1,40 +1,44 @@
-Below are the steps to get your plugin running. You can also find instructions at:
+# DynamicCharts
 
-  https://www.figma.com/plugin-docs/plugin-quickstart-guide/
+Design dynamic, fully adaptable charts directly in Figma. Easily generate bar, line, pie, and area charts by tweaking values and colors on the fly for your dashboards and presentations; no manual vector drawing required.
 
-This plugin template uses Typescript and NPM, two standard tools in creating JavaScript applications.
+## Características (v1.0)
 
-First, download Node.js which comes with NPM. This will allow you to install TypeScript and other
-libraries. You can find the download link here:
+Generación instantánea de gráficos basados en datos reales:
+- **Gráficos de Barras** (Adquisición, comparativas).
+- **Gráficos de Líneas** (Retención, evolución temporal).
+- **Gráficos Circulares** (Distribución de canales/segmentos).
+- **Timelines** (Roadmaps y planificación).
 
-  https://nodejs.org/en/download/
+*Nota: Todos los gráficos se renderizan automáticamente usando las variables de color, tipografías y márgenes oficiales de North.*
 
-Next, install TypeScript using the command:
+## 🚀 Instalación y Uso
 
-  npm install -g typescript
+### Uso directo (La forma más rápida)
 
-Finally, in the directory of your plugin, get the latest type definitions for the plugin API by running:
+Si solo quieres utilizar la herramienta en tus presentaciones, ya está publicada y disponible directamente en nuestro Figma:
 
-  npm install --save-dev @figma/plugin-typings
+1. Abre cualquier archivo de diseño en Figma.
+2. Ve al menú superior y selecciona **Plugins**.
+3. En el buscador, escribe **Dynamic Charts**.
+4. Haz clic en **Run** (Ejecutar), introduce tus datos y genera tu gráfico.
 
-If you are familiar with JavaScript, TypeScript will look very familiar. In fact, valid JavaScript code
-is already valid Typescript code.
+### Adaptar plugin localmente (Uso individual)
 
-TypeScript adds type annotations to variables. This allows code editors such as Visual Studio Code
-to provide information about the Figma API while you are writing code, as well as help catch bugs
-you previously didn't notice.
+1. Descarga o clona este repositorio en tu equipo.
+2. Abre la aplicación de escritorio de Figma.
+3. Ve al menú superior: **Plugins > Manage plugins > Development**.
+4. Haz clic en **Import plugin from manifest** y selecciona el archivo `manifest.json` que está en esta carpeta.
+5. ¡Listo! Abre el plugin en cualquier archivo, introduce tus datos y genera el gráfico.
 
-For more information, visit https://www.typescriptlang.org/
+### Contribuir (Modificar plugin colaborativo)
 
-Using TypeScript requires a compiler to convert TypeScript (code.ts) into JavaScript (code.js)
-for the browser to run.
+Esta es una herramienta viva. Si quieres añadir nuevos formatos o mejorar la lógica:
 
-We recommend writing TypeScript code using Visual Studio code:
+1. Modifica este código localmente con total libertad.
+2. Abre un **Pull Request** en GitHub detallando tu propuesta.
+3. Lo validaremos y actualizaremos el plugin principal para que tus mejoras sean útiles para todo el equipo.
 
-1. Download Visual Studio Code if you haven't already: https://code.visualstudio.com/.
-2. Open this directory in Visual Studio Code.
-3. Compile TypeScript to JavaScript: Run the "Terminal > Run Build Task..." menu item,
-    then select "npm: watch". You will have to do this again every time
-    you reopen Visual Studio Code.
+## Contribuye y rompe cosas
 
-That's it! Visual Studio Code will regenerate the JavaScript file every time you save.
+Esta es una herramienta viva. Úsala, ponla al límite en tus próximas presentaciones y cuéntanos qué falla o qué nuevos formatos echas en falta. Todo feedback es bienvenido para seguir creciendo y optimizando procesos.
