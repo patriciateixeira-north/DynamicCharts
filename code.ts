@@ -2982,10 +2982,10 @@ async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
 
   const n = entries.length
   const maxVal = Math.max(...entries.map(e => e.value)) || 1
-  const highlightCount = Math.min(3, n)
-  const highlightLabels = new Set(
-    [...entries].sort((a, b) => b.value - a.value).slice(0, highlightCount).map(e => e.label)
-  )
+  // Same gradient Pie/Donut use — full brand color down to a light tint of it, assigned by
+  // each entry's own position in the data (not by value), so the wheel reads predominantly
+  // red/on-brand instead of "a few red highlights in a sea of gray."
+  const colors = seriesColorsLight(barColor, n, theme.bg)
   const anglePer = (Math.PI * 2) / n
   const gap = anglePer * 0.08
 
@@ -3005,8 +3005,7 @@ async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
       const a = startA + (s / slices) * (endA - startA)
       innerPts.push({ x: cx + Math.cos(a) * innerR, y: cy + Math.sin(a) * innerR })
     }
-    const isHi = highlightLabels.has(e.label)
-    const petal = await makeVectorPolygon(outerPts.concat(innerPts), isHi ? barColor : theme.muted)
+    const petal = await makeVectorPolygon(outerPts.concat(innerPts), colors[i])
     petal.name = 'petal'
     frame.appendChild(petal)
 
@@ -3014,7 +3013,7 @@ async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
     const labelR = outerR + labelGap
     const lx = cx + Math.cos(midA) * labelR
     const ly = cy + Math.sin(midA) * labelR
-    const valTxt = await createValueLabel(e.value, VALUE_FONT_SIZE, isHi ? theme.text : theme.muted)
+    const valTxt = await createValueLabel(e.value, VALUE_FONT_SIZE, theme.text)
     valTxt.x = Math.round(lx - (valTxt.width || 0) / 2)
     valTxt.y = Math.round(ly - (valTxt.height || VALUE_FONT_SIZE) - 4)
     frame.appendChild(valTxt)
