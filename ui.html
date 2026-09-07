@@ -175,6 +175,10 @@
     }
     .block-delete { width:28px; height:28px; display:flex; align-items:center; justify-content:center; border:none; background:transparent; padding:0; color:#9AA0A6; cursor:pointer }
     .block-delete:hover { color:#6B7280 }
+    .json-import-panel { padding: 10px 0 4px 0 }
+    .json-import-panel textarea { width:100%; box-sizing:border-box; min-height:120px; max-height:260px; border-radius:10px; background:var(--control-bg); border:none; padding:10px 12px; font-size:12px; line-height:1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize:vertical }
+    .json-import-error { color:#D61526; font-size:12px; margin-top:6px; line-height:1.4 }
+    .json-import-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px }
 fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
 #status-label { color:#6B7280; font-size: 13px; }
     #go { background: var(--accent); color: white; padding: 12px 18px; border-radius:12px; box-shadow: 0 6px 18px rgba(10,132,255,0.14); font-weight:700; min-width:160px; border:none; cursor:pointer }
@@ -277,6 +281,15 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       </fig-group>
       <div class="data-header">
         <span>Data entries</span>
+        <button type="button" class="add-btn" id="importJsonBtn">Import JSON</button>
+      </div>
+      <div class="json-import-panel" id="jsonImportPanel" style="display:none">
+        <textarea id="jsonImportText" spellcheck="false"></textarea>
+        <div class="json-import-error" id="jsonImportError" style="display:none"></div>
+        <div class="json-import-actions">
+          <button type="button" class="secondary-btn" id="jsonImportCancel">Cancel</button>
+          <button type="button" class="secondary-btn" id="jsonImportApply">Apply</button>
+        </div>
       </div>
       <div class="data-scroll" id="genericDataScroll">
         <div class="column-labels" id="column-labels">
@@ -856,6 +869,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     function selectChartType(type) {
       const oldType = currentChartType
       currentChartType = type
+      closeJsonImportPanel()
       document.querySelectorAll('.chart-type-btn').forEach(btn => {
         btn.classList.toggle('selected', btn.dataset.type === type)
       })
@@ -1274,6 +1288,167 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       setDataFromString(currentData)
     }
 
+    // ---- JSON import ----
+    // Lets data come in as JSON (pasted from a spreadsheet export, an API response, etc.)
+    // instead of typed row-by-row — it lands in the exact same rows/state as manual entry
+    // (via createBlock / tableColumnNames / timelinePhases), so everything downstream
+    // (collectDataString, the "run" message, editing) doesn't need to know data ever came
+    // from JSON at all.
+    function jsonPlaceholderExample() {
+      if (currentChartType === 'timeline') {
+        return JSON.stringify({ phases: [{ label: 'Discovery', start: '2026-01-05', end: '2026-01-19', tasks: [{ label: 'Research', start: '2026-01-05', end: '2026-01-10' }] }] }, null, 2)
+      }
+      if (currentChartType === 'table') {
+        return JSON.stringify({ columns: tableColumnNames, rows: [['Design review', '2 weeks', 'UX']] }, null, 2)
+      }
+      if (currentChartType === 'kpi') {
+        return JSON.stringify([{ value: '120K', label: 'Revenue', description: 'vs last year' }], null, 2)
+      }
+      if (MULTI_SERIES_TYPES.includes(currentChartType)) {
+        return JSON.stringify([{ label: 'Jan', values: [120, 90] }, { label: 'Feb', values: [140, 100] }], null, 2)
+      }
+      return JSON.stringify([{ label: 'Q1', value: 120 }, { label: 'Q2', value: 90 }], null, 2)
+    }
+
+    function toCellString(v) { return v === undefined || v === null ? '' : String(v) }
+
+    function importGenericJson(json) {
+      if (!Array.isArray(json)) throw new Error('Expected a JSON array of { "label", "value" } objects.')
+      clearBlocks()
+      json.forEach(item => {
+        const label = item && item.label !== undefined ? toCellString(item.label) : ''
+        const value = item && Array.isArray(item.values) ? item.values[0] : (item ? item.value : undefined)
+        createBlock(label, [toCellString(value)])
+      })
+      if (!json.length) createBlock(nextDataLabel(), defaultValues())
+    }
+
+    function importMultiSeriesJson(json) {
+      if (!Array.isArray(json)) throw new Error('Expected a JSON array of { "label", "values": [...] } objects.')
+      const lens = json.map(it => Array.isArray(it && it.values) ? it.values.length : (it && it.value !== undefined ? 1 : 0))
+      const maxLen = json.length ? Math.max(MIN_SERIES, ...lens) : MIN_SERIES
+      setSeriesCount(maxLen)
+      updateColumnLabels()
+      clearBlocks()
+      json.forEach(item => {
+        const label = item && item.label !== undefined ? toCellString(item.label) : ''
+        const values = Array.isArray(item && item.values) ? item.values.map(toCellString) : (item && item.value !== undefined ? [toCellString(item.value)] : [])
+        createBlock(label, values)
+      })
+      if (!json.length) createBlock(nextDataLabel(), defaultValues())
+    }
+
+    function importTableJson(json) {
+      let columns, rows
+      if (Array.isArray(json)) {
+        if (!json.length) throw new Error('The JSON array is empty.')
+        if (Array.isArray(json[0])) {
+          const width = Math.max(...json.map(r => r.length))
+          columns = tableColumnNames.slice(0, width)
+          while (columns.length < width) columns.push('Column ' + (columns.length + 1))
+          rows = json.map(r => r.map(toCellString))
+        } else {
+          columns = Object.keys(json[0])
+          rows = json.map(obj => columns.map(c => toCellString(obj ? obj[c] : undefined)))
+        }
+      } else if (json && Array.isArray(json.columns) && Array.isArray(json.rows)) {
+        columns = json.columns.map(toCellString)
+        rows = json.rows.map(r => Array.isArray(r) ? r.map(toCellString) : columns.map(c => toCellString(r ? r[c] : undefined)))
+      } else {
+        throw new Error('Expected { "columns": [...], "rows": [[...]] } or an array of row objects.')
+      }
+      while (columns.length < MIN_TABLE_COLS) columns.push('Column ' + (columns.length + 1))
+      if (columns.length > MAX_TABLE_COLS) columns = columns.slice(0, MAX_TABLE_COLS)
+      tableColumnNames = columns
+      updateColumnLabels()
+      clearBlocks()
+      rows.forEach(cells => createBlock(cells[0] || '', cells.slice(1)))
+      if (!rows.length) createBlock('', defaultValues())
+    }
+
+    function importKpiJson(json) {
+      if (!Array.isArray(json)) throw new Error('Expected a JSON array of { "value", "label", "description" } objects.')
+      clearBlocks()
+      json.forEach(item => {
+        const label = item && item.label !== undefined ? toCellString(item.label) : ''
+        const value = item && item.value !== undefined ? toCellString(item.value) : ''
+        const description = item && item.description !== undefined ? toCellString(item.description) : ''
+        createBlock(label, [value, description])
+      })
+      if (!json.length) createBlock('', defaultValues())
+    }
+
+    function importTimelineJson(json) {
+      const phasesIn = Array.isArray(json) ? json : (json && Array.isArray(json.phases) ? json.phases : null)
+      if (!phasesIn) throw new Error('Expected { "phases": [{ "label", "start", "end", "tasks": [...] }] }.')
+      timelinePhases = phasesIn.map(p => ({
+        label: p && p.label !== undefined ? toCellString(p.label) : '',
+        start: p && p.start ? toCellString(p.start) : '',
+        end: p && p.end ? toCellString(p.end) : '',
+        collapsed: false,
+        tasks: Array.isArray(p && p.tasks) ? p.tasks.map(t => ({
+          label: t && t.label !== undefined ? toCellString(t.label) : '',
+          start: t && t.start ? toCellString(t.start) : '',
+          end: t && t.end ? toCellString(t.end) : '',
+        })) : [],
+      }))
+      if (!timelinePhases.length) timelinePhases.push(newTimelinePhase())
+      renderTimelineTree()
+    }
+
+    function closeJsonImportPanel() {
+      const panel = document.getElementById('jsonImportPanel')
+      if (panel) panel.style.display = 'none'
+      const err = document.getElementById('jsonImportError')
+      if (err) err.style.display = 'none'
+    }
+
+    document.getElementById('importJsonBtn').addEventListener('click', () => {
+      const panel = document.getElementById('jsonImportPanel')
+      const opening = panel.style.display === 'none'
+      if (opening) {
+        document.getElementById('jsonImportText').placeholder = jsonPlaceholderExample()
+        document.getElementById('jsonImportError').style.display = 'none'
+        panel.style.display = 'block'
+      } else {
+        closeJsonImportPanel()
+      }
+      reportHeight()
+    })
+    document.getElementById('jsonImportCancel').addEventListener('click', () => {
+      document.getElementById('jsonImportText').value = ''
+      closeJsonImportPanel()
+      reportHeight()
+    })
+    document.getElementById('jsonImportApply').addEventListener('click', () => {
+      const textEl = document.getElementById('jsonImportText')
+      const errEl = document.getElementById('jsonImportError')
+      const text = textEl.value.trim()
+      errEl.style.display = 'none'
+      if (!text) { errEl.textContent = 'Paste some JSON first.'; errEl.style.display = 'block'; return }
+      let json
+      try {
+        json = JSON.parse(text)
+      } catch (e) {
+        errEl.textContent = 'Invalid JSON: ' + e.message
+        errEl.style.display = 'block'
+        return
+      }
+      try {
+        if (currentChartType === 'timeline') importTimelineJson(json)
+        else if (currentChartType === 'table') importTableJson(json)
+        else if (currentChartType === 'kpi') importKpiJson(json)
+        else if (MULTI_SERIES_TYPES.includes(currentChartType)) importMultiSeriesJson(json)
+        else importGenericJson(json)
+      } catch (e) {
+        errEl.textContent = e && e.message ? e.message : 'Could not read this JSON for the selected chart type.'
+        errEl.style.display = 'block'
+        return
+      }
+      textEl.value = ''
+      closeJsonImportPanel()
+      reportHeight()
+    })
 
     document.getElementById('addEntry').addEventListener('click', () => {
       if (currentChartType === 'timeline') addTimelinePhase()
