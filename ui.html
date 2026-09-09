@@ -1396,11 +1396,16 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       renderTimelineTree()
     }
 
+    // The "Import JSON" button hides itself while the box is open — Apply/Cancel down in
+    // the panel are already the way to leave it, so keeping the button visible too would
+    // just be a second, redundant way to do the same thing.
     function closeJsonImportPanel() {
       const panel = document.getElementById('jsonImportPanel')
       if (panel) panel.style.display = 'none'
       const err = document.getElementById('jsonImportError')
       if (err) err.style.display = 'none'
+      const btn = document.getElementById('importJsonBtn')
+      if (btn) btn.style.display = ''
     }
 
     document.getElementById('importJsonBtn').addEventListener('click', () => {
@@ -1410,6 +1415,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
         document.getElementById('jsonImportText').placeholder = jsonPlaceholderExample()
         document.getElementById('jsonImportError').style.display = 'none'
         panel.style.display = 'block'
+        document.getElementById('importJsonBtn').style.display = 'none'
       } else {
         closeJsonImportPanel()
       }
