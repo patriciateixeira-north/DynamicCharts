@@ -179,6 +179,18 @@
     .json-import-panel textarea { width:100%; box-sizing:border-box; min-height:120px; max-height:260px; border-radius:10px; background:var(--control-bg); border:none; padding:10px 12px; font-size:12px; line-height:1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize:vertical }
     .json-import-error { color:#D61526; font-size:12px; margin-top:6px; line-height:1.4 }
     .json-import-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px }
+    .aesthetic-cards { display:flex; gap:10px; margin-bottom:16px }
+    .aesthetic-card { flex:1; display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#FBFCFD; cursor:pointer; text-align:left; font-family:inherit }
+    .aesthetic-card:hover { background:#FFFFFF }
+    .aesthetic-card.selected { border-color: var(--accent); background: rgba(10,132,255,0.06) }
+    .aesthetic-card strong { font-size:13px; color:#111827 }
+    .aesthetic-card span:not(.aesthetic-swatch) { font-size:11px; color:#6B7280; line-height:1.4 }
+    .aesthetic-swatch { width:26px; height:26px; border-radius:8px; display:block }
+    .aesthetic-swatch-custom { display:flex; align-items:center; justify-content:center; background:var(--control-bg); font-size:12px; color:#6B7280 }
+    .aesthetic-json-panel { margin-bottom:16px }
+    .aesthetic-json-panel textarea, #aestheticExportText { width:100%; box-sizing:border-box; min-height:120px; max-height:220px; border-radius:10px; background:var(--control-bg); border:none; padding:10px 12px; font-size:12px; line-height:1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize:vertical }
+    .aesthetic-export { margin-bottom: 4px }
+    #aestheticExportText { margin-top:8px }
 fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
 #status-label { color:#6B7280; font-size: 13px; }
     #go { background: var(--accent); color: white; padding: 12px 18px; border-radius:12px; box-shadow: 0 6px 18px rgba(10,132,255,0.14); font-weight:700; min-width:160px; border:none; cursor:pointer }
@@ -191,6 +203,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
         <span class="title">Dynamic Charts</span>
       </div>
       <div class="icons">
+        <button type="button" id="aestheticBtn" class="icon" title="Aesthetic">&#127912;</button>
         <button type="button" id="helpBtn" class="icon" title="Show welcome guide">?</button>
         <button type="button" id="collapseBtn" class="icon" title="Minimize">&#8722;</button>
       </div>
@@ -237,6 +250,35 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       </div>
       <div class="onboarding-footer">
         <button type="button" id="onboardingDone" class="onboarding-cta">Get started</button>
+      </div>
+    </div>
+    <div class="onboarding" id="aestheticScreen" style="display:none">
+      <div class="onboarding-body">
+        <h1>Choose your aesthetic</h1>
+        <p class="onboarding-lead">Pick North's default look, or paste a style JSON (color, theme and fonts) to match another brand. You can reopen this anytime from the &#127912; icon above.</p>
+        <div class="aesthetic-cards" id="aestheticCards">
+          <button type="button" class="aesthetic-card selected" data-aesthetic="north">
+            <span class="aesthetic-swatch" style="background:#D61526"></span>
+            <strong>North</strong>
+            <span>Noe Display / Moderat · Light</span>
+          </button>
+          <button type="button" class="aesthetic-card" data-aesthetic="custom">
+            <span class="aesthetic-swatch aesthetic-swatch-custom">{ }</span>
+            <strong>Paste JSON</strong>
+            <span>Bring your own color, theme and fonts</span>
+          </button>
+        </div>
+        <div class="aesthetic-json-panel" id="aestheticJsonPanel" style="display:none">
+          <textarea id="aestheticJsonText" spellcheck="false"></textarea>
+          <div class="json-import-error" id="aestheticJsonError" style="display:none"></div>
+        </div>
+        <div class="aesthetic-export">
+          <button type="button" class="secondary-btn" id="aestheticExportBtn">Export current as JSON</button>
+          <textarea id="aestheticExportText" readonly spellcheck="false" style="display:none"></textarea>
+        </div>
+      </div>
+      <div class="onboarding-footer">
+        <button type="button" id="aestheticContinue" class="onboarding-cta">Continue</button>
       </div>
     </div>
     <fig-content>
@@ -1492,7 +1534,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       customColorRow.style.display = mode === 'custom' ? 'flex' : 'none'
       currentTheme = mode === 'negative' ? 'dark' : 'light'
       if (mode === 'positive') setControlValue('barColor', POSITIVE_COLOR)
-      else if (mode === 'negative') setControlValue('barColor', NEGATIVE_COLOR)
+      else if (mode === 'negative' && !opts.keepColor) setControlValue('barColor', NEGATIVE_COLOR)
       else if (mode === 'custom' && !opts.keepColor) setControlValue('barColor', POSITIVE_COLOR)
       if (!opts.silent) reportHeight()
     }
@@ -1551,6 +1593,106 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     document.getElementById('vatShowTotal').addEventListener('change', () => reportHeight())
     setVatMode('excluded', { silent: true })
 
+    // ---- Aesthetic (color + theme + fonts) ----
+    // Asked once up front (before the user ever touches a chart type) rather than folded
+    // into the per-chart Color section, so it reads as a one-time "house style" decision —
+    // North's own look, or a pasted JSON matching another brand — that then quietly carries
+    // forward into every chart created in this session, not something you re-pick per chart.
+    const NORTH_AESTHETIC = { color: '#D61526', theme: 'light', displayFont: 'Noe Display', textFont: 'Moderat' }
+    let currentAesthetic = Object.assign({}, NORTH_AESTHETIC)
+    let displayFontFamily = NORTH_AESTHETIC.displayFont
+    let textFontFamily = NORTH_AESTHETIC.textFont
+    let aestheticChosen = false
+    let selectedAestheticCard = 'north'
+
+    function showAestheticScreen() {
+      const el = document.getElementById('aestheticScreen')
+      if (el) el.style.display = 'flex'
+      reportHeight()
+    }
+    function hideAestheticScreen() {
+      const el = document.getElementById('aestheticScreen')
+      if (el) el.style.display = 'none'
+      reportHeight()
+    }
+    // Only ever pops up unprompted once per session, and never while onboarding is showing
+    // or while a chart is already selected for editing (that chart's own saved aesthetic
+    // applies instead — see the 'selection' handler below). Reopening later is always
+    // available via the palette icon regardless of this flag.
+    function maybeShowAestheticScreen() {
+      if (aestheticChosen) return
+      const onboardingEl = document.getElementById('onboarding')
+      if (onboardingEl && onboardingEl.style.display === 'flex') return
+      if (editingFrameId) { aestheticChosen = true; return }
+      showAestheticScreen()
+    }
+
+    function applyAestheticToUI(aesthetic) {
+      currentAesthetic = Object.assign({}, aesthetic)
+      displayFontFamily = aesthetic.displayFont || NORTH_AESTHETIC.displayFont
+      textFontFamily = aesthetic.textFont || NORTH_AESTHETIC.textFont
+      const hex = '#' + String(aesthetic.color || NORTH_AESTHETIC.color).replace('#', '').toUpperCase()
+      setControlValue('barColor', hex)
+      setColorMode(colorModeForHex(hex, aesthetic.theme), { keepColor: true })
+    }
+
+    document.querySelectorAll('#aestheticCards .aesthetic-card').forEach(card => {
+      card.addEventListener('click', () => {
+        document.querySelectorAll('#aestheticCards .aesthetic-card').forEach(c => c.classList.remove('selected'))
+        card.classList.add('selected')
+        selectedAestheticCard = card.dataset.aesthetic
+        const jsonPanel = document.getElementById('aestheticJsonPanel')
+        jsonPanel.style.display = selectedAestheticCard === 'custom' ? 'block' : 'none'
+        document.getElementById('aestheticJsonError').style.display = 'none'
+        if (selectedAestheticCard === 'custom') {
+          document.getElementById('aestheticJsonText').placeholder = JSON.stringify({ color: '#0A84FF', theme: 'dark', displayFont: 'Playfair Display', textFont: 'Inter' }, null, 2)
+        }
+        reportHeight()
+      })
+    })
+
+    document.getElementById('aestheticContinue').addEventListener('click', () => {
+      if (selectedAestheticCard === 'north') {
+        applyAestheticToUI(NORTH_AESTHETIC)
+      } else {
+        const text = document.getElementById('aestheticJsonText').value.trim()
+        const errEl = document.getElementById('aestheticJsonError')
+        errEl.style.display = 'none'
+        if (text) {
+          let json
+          try { json = JSON.parse(text) }
+          catch (e) { errEl.textContent = 'Invalid JSON: ' + e.message; errEl.style.display = 'block'; reportHeight(); return }
+          applyAestheticToUI({
+            color: typeof json.color === 'string' ? json.color : NORTH_AESTHETIC.color,
+            theme: json.theme === 'dark' ? 'dark' : 'light',
+            displayFont: typeof json.displayFont === 'string' && json.displayFont.trim() ? json.displayFont.trim() : NORTH_AESTHETIC.displayFont,
+            textFont: typeof json.textFont === 'string' && json.textFont.trim() ? json.textFont.trim() : NORTH_AESTHETIC.textFont,
+          })
+        }
+        // No JSON pasted: leave whatever aesthetic is already active untouched.
+      }
+      aestheticChosen = true
+      hideAestheticScreen()
+    })
+
+    // Always reads the *live* color/theme/font state (not just whatever was picked when the
+    // screen last opened), so it reflects any tweak made afterward in the main Color section.
+    document.getElementById('aestheticExportBtn').addEventListener('click', () => {
+      const exportEl = document.getElementById('aestheticExportText')
+      // colorToHex appends an alpha byte (RRGGBBAA) for internal round-tripping elsewhere in
+      // this file — trimmed back to a plain #RRGGBB here since a portable brand color has no
+      // use for it.
+      const color6 = colorToHex(colorValue('barColor')).slice(0, 7)
+      const json = JSON.stringify({ color: color6, theme: currentTheme, displayFont: displayFontFamily, textFont: textFontFamily }, null, 2)
+      exportEl.value = json
+      exportEl.style.display = 'block'
+      exportEl.focus()
+      exportEl.select()
+      try { document.execCommand('copy') } catch (e) { /* selection still lets the user copy manually */ }
+      reportHeight()
+    })
+
+    document.getElementById('aestheticBtn').addEventListener('click', showAestheticScreen)
 
     let editingFrameId = null
 
@@ -1567,6 +1709,8 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
           vatIncluded: currentVatMode === 'included',
           vatShowTotal: document.getElementById('vatShowTotal').checked,
           tableColumns: tableColumnNames.join('\t'),
+          displayFontFamily: displayFontFamily,
+          textFontFamily: textFontFamily,
           editingFrameId: editingFrameId,
         }
       }, '*')
@@ -1575,7 +1719,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     function resetToCreateMode() {
       editingFrameId = null
       selectChartType('vertical')
-      setColorMode('positive')
+      applyAestheticToUI(currentAesthetic)
       setOverlappedValue(false)
       setGranularity('biweekly')
       setVatMode('excluded')
@@ -1643,6 +1787,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
         if (!msg.params) {
           // nothing (chart-related) selected on canvas anymore: back to create mode
           resetToCreateMode()
+          maybeShowAestheticScreen()
           return
         }
         // populate UI
@@ -1664,6 +1809,18 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
         if (msg.params.granularity) setGranularity(msg.params.granularity, { silent: true })
         setVatMode(msg.params.vatIncluded ? 'included' : 'excluded', { silent: true })
         document.getElementById('vatShowTotal').checked = !!msg.params.vatShowTotal
+        // Adopt this chart's own saved aesthetic (falls back to whatever's already active
+        // for a chart saved before fonts were configurable) rather than the session default —
+        // Update should never quietly swap a chart's fonts out from under it.
+        displayFontFamily = msg.params.displayFontFamily || displayFontFamily
+        textFontFamily = msg.params.textFontFamily || textFontFamily
+        currentAesthetic = { color: editHex, theme: msg.params.theme === 'dark' ? 'dark' : 'light', displayFont: displayFontFamily, textFont: textFontFamily }
+        aestheticChosen = true
+        // The aesthetic screen can already be open at this point (e.g. shown at startup
+        // because onboarding was seen before this selection message arrived) — an editing
+        // chart's own saved look always wins, so make sure it isn't left sitting on top of
+        // the edit UI.
+        hideAestheticScreen()
         // store editing frame id and switch UI mode
         editingFrameId = msg.frameId
         btn.textContent = 'Update chart'
@@ -1697,12 +1854,14 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     document.getElementById('onboardingDone').addEventListener('click', () => {
       try { window.localStorage.setItem(ONBOARDING_KEY, '1') } catch (e) {}
       hideOnboarding()
+      maybeShowAestheticScreen()
     })
     document.getElementById('helpBtn').addEventListener('click', showOnboarding)
 
     let seenOnboarding = false
     try { seenOnboarding = window.localStorage.getItem(ONBOARDING_KEY) === '1' } catch (e) {}
     if (!seenOnboarding) showOnboarding()
+    else maybeShowAestheticScreen()
 
     reportHeight()
   </script>

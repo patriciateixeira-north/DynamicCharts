@@ -1,5 +1,5 @@
 type ToolColor = { r: number; g: number; b: number; a: number }
-type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string }
+type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string; displayFontFamily?: string; textFontFamily?: string }
 const TOOL_ID = "b7b8983d-a536-4eeb-b76e-89d2f24bca63"
 const DISPLAY_NAME = "Dynamic Charts"
 const CHART_DATA_KEY = 'chartData'
@@ -494,11 +494,18 @@ function createAnchoredDot(x: number, y: number, size: number, color: ToolColor)
   return anchor
 }
 
-const NOE_REGULAR: FontName = { family: 'Noe Display', style: 'Regular' }
-const NOE_BOLD: FontName = { family: 'Noe Display', style: 'Bold' }
-const MODERAT_LIGHT: FontName = { family: 'Moderat', style: 'Light' }
-const MODERAT_REGULAR: FontName = { family: 'Moderat', style: 'Regular' }
-const MODERAT_MEDIUM: FontName = { family: 'Moderat', style: 'Medium' }
+// North's own defaults. An aesthetic JSON pasted in the UI can override the family names
+// (see applyFontFamilies below); these five FontName vars are what every draw* function
+// and text helper in this file actually reads from, so overriding them once per draw call
+// is all a custom aesthetic needs to reach every text node without threading a font
+// parameter through every helper.
+const DEFAULT_DISPLAY_FONT_FAMILY = 'Noe Display'
+const DEFAULT_TEXT_FONT_FAMILY = 'Moderat'
+let NOE_REGULAR: FontName = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Regular' }
+let NOE_BOLD: FontName = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Bold' }
+let MODERAT_LIGHT: FontName = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Light' }
+let MODERAT_REGULAR: FontName = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Regular' }
+let MODERAT_MEDIUM: FontName = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Medium' }
 const GRAY_TEXT: ToolColor = { r: 0.42, g: 0.42, b: 0.44, a: 1 }
 const GRID_COLOR: ToolColor = { r: 0.88, g: 0.88, b: 0.88, a: 1 }
 const BLACK: ToolColor = { r: 0.07, g: 0.07, b: 0.07, a: 1 }
@@ -521,7 +528,43 @@ function getTheme(mode: ChartData['theme']): Theme {
   return mode === 'dark' ? DARK_THEME : LIGHT_THEME
 }
 
-async function loadFonts(): Promise<void> {
+// Resolves the chart's font families for this draw call (North's defaults, or whatever an
+// aesthetic JSON pasted in the UI asked for) into the five module-level FontName vars above,
+// then loads them. A custom family that isn't actually installed in the user's Figma account
+// would otherwise only surface as a cryptic failure deep inside some later text-creation
+// call — so the regular weight is loaded and validated *here*, up front, with a clear
+// fallback to North's own fonts if it's missing.
+async function applyFontFamilies(data: ChartData): Promise<void> {
+  const wantedDisplay = data.displayFontFamily && data.displayFontFamily.trim() ? data.displayFontFamily.trim() : DEFAULT_DISPLAY_FONT_FAMILY
+  const wantedText = data.textFontFamily && data.textFontFamily.trim() ? data.textFontFamily.trim() : DEFAULT_TEXT_FONT_FAMILY
+
+  NOE_REGULAR = { family: wantedDisplay, style: 'Regular' }
+  NOE_BOLD = { family: wantedDisplay, style: 'Bold' }
+  if (wantedDisplay !== DEFAULT_DISPLAY_FONT_FAMILY) {
+    try { await figma.loadFontAsync(NOE_REGULAR) }
+    catch {
+      figma.notify(`Font "${wantedDisplay}" not found — using ${DEFAULT_DISPLAY_FONT_FAMILY} instead`)
+      NOE_REGULAR = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Regular' }
+      NOE_BOLD = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Bold' }
+    }
+  }
+
+  MODERAT_LIGHT = { family: wantedText, style: 'Light' }
+  MODERAT_REGULAR = { family: wantedText, style: 'Regular' }
+  MODERAT_MEDIUM = { family: wantedText, style: 'Medium' }
+  if (wantedText !== DEFAULT_TEXT_FONT_FAMILY) {
+    try { await figma.loadFontAsync(MODERAT_REGULAR) }
+    catch {
+      figma.notify(`Font "${wantedText}" not found — using ${DEFAULT_TEXT_FONT_FAMILY} instead`)
+      MODERAT_LIGHT = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Light' }
+      MODERAT_REGULAR = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Regular' }
+      MODERAT_MEDIUM = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Medium' }
+    }
+  }
+}
+
+async function loadFonts(data: ChartData): Promise<void> {
+  await applyFontFamilies(data)
   await figma.loadFontAsync(NOE_REGULAR)
   await figma.loadFontAsync(MODERAT_LIGHT)
   try { await figma.loadFontAsync(NOE_BOLD) } catch { /* fallback to regular */ }
@@ -650,7 +693,7 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
     figma.notify('No data entries to draw')
     return null
   }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const paddingLeft = 140
@@ -872,6 +915,8 @@ figma.ui.onmessage = async (msg) => {
       vatIncluded: !!msg.vatIncluded,
       vatShowTotal: !!msg.vatShowTotal,
       tableColumns: typeof msg.tableColumns === 'string' ? msg.tableColumns : undefined,
+      displayFontFamily: typeof msg.displayFontFamily === 'string' && msg.displayFontFamily.trim() ? msg.displayFontFamily.trim() : undefined,
+      textFontFamily: typeof msg.textFontFamily === 'string' && msg.textFontFamily.trim() ? msg.textFontFamily.trim() : undefined,
     }
 
     // if editing an existing frame
@@ -994,7 +1039,7 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
   // the sequential points along the shared x-axis.
   const lines = parseMultiSeries(data.data)
   if (!lines.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const lineCount = lines.length
   const pointCount = lines[0].values.length
@@ -1127,7 +1172,7 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
 async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
   const rows = parseMultiSeries(data.data)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const seriesCount = rows[0].values.length
   const overlapped = !!data.overlapped
@@ -1250,7 +1295,7 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
 async function drawRadarChart(data: ChartData): Promise<FrameNode | null> {
   const rows = parseData(data.data)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const padding = 150
   const labelPad = 60
@@ -1340,7 +1385,7 @@ async function drawRadarChart(data: ChartData): Promise<FrameNode | null> {
 async function drawPieChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const size = 770
   const topOffset = 100
@@ -1409,7 +1454,7 @@ async function drawPieChart(data: ChartData): Promise<FrameNode | null> {
 async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const size = 715
   const topOffset = 100
@@ -1488,7 +1533,7 @@ async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
 async function drawProgressChart(data: ChartData): Promise<FrameNode | null> {
   const rows = parseMultiSeries(data.data)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const seriesCount = rows[0].values.length
   const overlapped = !!data.overlapped
@@ -1639,7 +1684,7 @@ function formatCurrency(n: number): string {
 async function drawBudgetChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   // VAT is a fixed 21% (Spain's standard rate) — not user-editable, so this never reads
@@ -1795,7 +1840,7 @@ function parseTableRows(dataStr: string, columnsStr: string | undefined): { colu
 async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
   const { columns, rows } = parseTableRows(data.data, data.tableColumns)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const paddingX = 50, paddingTop = 40, paddingBottom = 40
@@ -2074,7 +2119,7 @@ async function drawKpiStat(parent: FrameNode, stat: KpiStat, x: number, y: numbe
 async function drawKpiChart(data: ChartData): Promise<FrameNode | null> {
   const stats = parseKpiRows(data.data)
   if (!stats.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
@@ -2288,7 +2333,7 @@ async function drawKpiChart(data: ChartData): Promise<FrameNode | null> {
 async function drawTimelineChart(data: ChartData): Promise<FrameNode | null> {
   const valid = parseTimelineRows(data.data)
   if (!valid.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const minStart = new Date(Math.min(...valid.map(r => r.start.getTime())))
@@ -2552,7 +2597,7 @@ async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
     figma.notify('No data entries to draw')
     return null
   }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const paddingLeft = 150
@@ -2653,7 +2698,7 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     figma.notify('No data entries to draw')
     return null
   }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const rowHeight = 90
@@ -2870,7 +2915,7 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
 async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
@@ -2962,7 +3007,7 @@ async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
 async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
@@ -3082,7 +3127,7 @@ async function makeCurvedConnector(p1: { x: number; y: number }, p2: { x: number
 async function drawTreeChart(data: ChartData): Promise<FrameNode | null> {
   const items = parseTreeItems(data.data)
   if (!items.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
