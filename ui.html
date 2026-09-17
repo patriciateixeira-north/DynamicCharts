@@ -69,6 +69,7 @@
     .settings { padding: 6px 0 12px 0 }
     .data-header { display:flex; align-items:center; justify-content:space-between; padding-top:18px }
     .data-header span { font-weight:700; color:#111827 }
+    .data-header-actions { display:flex; align-items:center; gap:14px }
     .data-footer { display:flex; justify-content:flex-end; padding-top:6px }
     .add-btn { color: var(--accent); font-weight:600; border:none; background:transparent; cursor:pointer }
     .secondary-btn { color: var(--accent); font-weight:600; font-size:13px; border:1px solid var(--accent); border-radius:10px; background:transparent; padding:8px 14px; cursor:pointer }
@@ -107,6 +108,12 @@
     .tl-task-row { display:flex; align-items:center; gap:6px }
     .tl-task-label { flex: 1 1 120px; min-width:70px; border-radius:8px; background:transparent; border:1px solid var(--border) }
     .tl-add-task { align-self:flex-start; padding:4px 2px; font-size:12px }
+    /* Index reuses this same accordion (tl-phase-card/tl-task-row etc.) for its Chapter/Entry
+       hierarchy — these two are its only chart-specific fields: a narrow Page number (fixed
+       width, same slot as Timeline's date-range button) and, on entry rows only, an optional
+       Subtitle. */
+    .idx-page-input { flex: 0 0 64px; min-width:56px; height:32px; padding:4px 8px; font-size:12px; text-align:center; border-radius:8px; background:var(--control-bg); border:none; color:#111827 }
+    .idx-sub-subtitle-input { flex: 1 1 100px; min-width:70px; height:32px; padding:4px 10px; font-size:12px; border-radius:8px; background:var(--control-bg); border:none; color:#6B7280 }
     /* Date-range trigger: opens the custom popover below instead of a native <input
        type="date"> — the native calendar popup can't be restyled at all (no CSS hook into
        its internals), so a single click/tap/range-select date range needs its own
@@ -190,7 +197,10 @@
     .aesthetic-json-panel { margin-bottom:16px }
     .aesthetic-json-panel textarea, #aestheticExportText { width:100%; box-sizing:border-box; min-height:120px; max-height:220px; border-radius:10px; background:var(--control-bg); border:none; padding:10px 12px; font-size:12px; line-height:1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize:vertical }
     .aesthetic-export { margin-bottom: 4px }
-    #aestheticExportText { margin-top:8px }
+    .aesthetic-export-box { position:relative; margin-top:8px }
+    #aestheticExportText { margin-top:0; padding-right:34px }
+    .aesthetic-export-close { position:absolute; top:8px; right:8px; width:22px; height:22px; border:none; background:rgba(0,0,0,0.06); border-radius:6px; cursor:pointer; font-size:15px; line-height:1; color:#6B7280; display:flex; align-items:center; justify-content:center; padding:0 }
+    .aesthetic-export-close:hover { background:rgba(0,0,0,0.1); color:#111827 }
 fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
 #status-label { color:#6B7280; font-size: 13px; }
     #go { background: var(--accent); color: white; padding: 12px 18px; border-radius:12px; box-shadow: 0 6px 18px rgba(10,132,255,0.14); font-weight:700; min-width:160px; border:none; cursor:pointer }
@@ -273,8 +283,11 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
           <div class="json-import-error" id="aestheticJsonError" style="display:none"></div>
         </div>
         <div class="aesthetic-export">
-          <button type="button" class="secondary-btn" id="aestheticExportBtn">Export current as JSON</button>
-          <textarea id="aestheticExportText" readonly spellcheck="false" style="display:none"></textarea>
+          <button type="button" class="secondary-btn" id="aestheticExportBtn">View North JSON</button>
+          <div class="aesthetic-export-box" id="aestheticExportBox" style="display:none">
+            <button type="button" class="aesthetic-export-close" id="aestheticExportClose" title="Close">&times;</button>
+            <textarea id="aestheticExportText" readonly spellcheck="false"></textarea>
+          </div>
         </div>
       </div>
       <div class="onboarding-footer">
@@ -323,7 +336,10 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       </fig-group>
       <div class="data-header">
         <span>Data entries</span>
-        <button type="button" class="add-btn" id="importJsonBtn">Import JSON</button>
+        <div class="data-header-actions">
+          <button type="button" class="add-btn" id="generateIndexBtn" style="display:none">Generate index</button>
+          <button type="button" class="add-btn" id="importJsonBtn">Import JSON</button>
+        </div>
       </div>
       <div class="json-import-panel" id="jsonImportPanel" style="display:none">
         <textarea id="jsonImportText" spellcheck="false"></textarea>
@@ -342,6 +358,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
         <div id="data-blocks"></div>
       </div>
       <div id="timeline-tree" style="display:none"></div>
+      <div id="index-tree" style="display:none"></div>
       <div class="data-footer">
         <button class="add-btn" id="addEntry">+ Add</button>
       </div>
@@ -382,6 +399,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       timeline: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 40" fill="none"><rect x="4" y="2" width="20" height="5" rx="2" fill="black"/><rect x="8" y="12" width="24" height="4" rx="2" fill="black" opacity="0.6"/><rect x="20" y="21" width="20" height="4" rx="2" fill="black" opacity="0.6"/><rect x="32" y="30" width="20" height="4" rx="2" fill="black" opacity="0.6"/></svg>',
       budget: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 48" fill="none"><rect x="1" y="1" width="42" height="46" rx="3" stroke="black" stroke-width="2.5"/><line x1="8" y1="14" x2="36" y2="14" stroke="black" stroke-width="2.5" opacity="0.45"/><line x1="8" y1="23" x2="36" y2="23" stroke="black" stroke-width="2.5" opacity="0.45"/><line x1="8" y1="32" x2="24" y2="32" stroke="black" stroke-width="2.5" opacity="0.45"/><line x1="8" y1="40" x2="36" y2="40" stroke="black" stroke-width="3.5"/></svg>',
       table: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 40" fill="none"><rect x="1" y="1" width="46" height="38" rx="3" stroke="black" stroke-width="2.5"/><line x1="1" y1="12" x2="47" y2="12" stroke="black" stroke-width="2.5"/><line x1="1" y1="21" x2="47" y2="21" stroke="black" stroke-width="1.5" opacity="0.45"/><line x1="1" y1="30" x2="47" y2="30" stroke="black" stroke-width="1.5" opacity="0.45"/></svg>',
+      index: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 40" fill="none"><rect x="0" y="2" width="30" height="5" rx="1" fill="black"/><rect x="44" y="2" width="8" height="5" rx="1" fill="black" opacity="0.5"/><rect x="0" y="17.5" width="34" height="5" rx="1" fill="black"/><rect x="44" y="17.5" width="8" height="5" rx="1" fill="black" opacity="0.5"/><rect x="0" y="33" width="26" height="5" rx="1" fill="black"/><rect x="44" y="33" width="8" height="5" rx="1" fill="black" opacity="0.5"/></svg>',
       kpi: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 40" fill="none"><line x1="6" y1="12" x2="6" y2="24" stroke="black" stroke-width="3.5" stroke-linecap="round"/><line x1="0" y1="18" x2="12" y2="18" stroke="black" stroke-width="3.5" stroke-linecap="round"/><rect x="19" y="2" width="9" height="34" rx="2" fill="black"/><rect x="31" y="14" width="9" height="22" rx="2" fill="black" opacity="0.5"/></svg>',
       funnel: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 40" fill="none"><rect x="2" y="2" width="56" height="9" rx="1" fill="black"/><rect x="10.5" y="15.5" width="39" height="9" rx="1" fill="black" opacity="0.65"/><rect x="18.5" y="29" width="23" height="9" rx="1" fill="black" opacity="0.4"/></svg>',
       tree: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 52 40" fill="none"><line x1="0" y1="4" x2="8" y2="4" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="12" x2="8" y2="12" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="20" x2="8" y2="20" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="28" x2="8" y2="28" stroke="black" stroke-width="2" opacity="0.5"/><line x1="0" y1="36" x2="8" y2="36" stroke="black" stroke-width="2" opacity="0.5"/><path d="M8 4C24 4 24 14 40 14" stroke="black" stroke-width="1.3" opacity="0.4"/><path d="M8 12C24 12 24 14 40 14" stroke="black" stroke-width="1.3" opacity="0.4"/><path d="M8 20C24 20 24 14 40 14" stroke="black" stroke-width="1.3" opacity="0.5"/><path d="M8 28C24 28 24 30 40 30" stroke="black" stroke-width="1.3" opacity="0.4"/><path d="M8 36C24 36 24 30 40 30" stroke="black" stroke-width="1.3" opacity="0.4"/><circle cx="40" cy="14" r="6" fill="black"/><circle cx="40" cy="30" r="4" fill="black" opacity="0.6"/></svg>',
@@ -392,9 +410,9 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       vertical: 'Vertical', horizontal: 'Horizontal', line: 'Line',
       grouped: 'Grouped', radar: 'Radar',
       pie: 'Pie', donut: 'Donut', progress: 'Progress', timeline: 'Timeline', budget: 'Budget', table: 'Table',
-      kpi: 'KPI', funnel: 'Funnel', network: 'Network', petals: 'Petals', tree: 'Tree',
+      kpi: 'KPI', funnel: 'Funnel', network: 'Network', petals: 'Petals', tree: 'Tree', index: 'Index',
     }
-    const chartTypeOrder = ['vertical', 'horizontal', 'line', 'grouped', 'radar', 'pie', 'donut', 'progress', 'timeline', 'funnel', 'budget', 'table', 'kpi', 'network', 'petals', 'tree']
+    const chartTypeOrder = ['vertical', 'horizontal', 'line', 'grouped', 'radar', 'pie', 'donut', 'progress', 'timeline', 'funnel', 'budget', 'table', 'index', 'kpi', 'network', 'petals', 'tree']
     const grid = document.getElementById('chartTypeGrid')
     chartTypeOrder.forEach((type, idx) => {
       const btn = document.createElement('button')
@@ -482,10 +500,11 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       return currentChartType === 'line' ? MAX_SERIES_LINE : MAX_SERIES
     }
 
-    // Timeline has its own dedicated Phase/Subtask accordion editor (see timelinePhases
-    // below) rather than going through the generic row list, so it needs no entry here.
-    // KPI's Value/Description are a fixed pair (not addable/removable, like Timeline's fixed
-    // Start/End/Phase), not a comparison series.
+    // Timeline and Index both have their own dedicated Phase/Subtask (resp. Chapter/Entry)
+    // accordion editor (see timelinePhases / indexChapters below) rather than going through
+    // the generic row list, so neither needs an entry here. KPI's Value/Description are a
+    // fixed pair (not addable/removable, like those accordions' fixed shapes), not a
+    // comparison series.
     function getValueColumnCount() {
       if (currentChartType === 'table') return Math.max(1, tableColumnNames.length - 1)
       if (currentChartType === 'kpi') return 2
@@ -825,6 +844,204 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       renderTimelineTree()
     }
 
+    // Index: same nested-accordion shape as Timeline's Phase/Subtask editor above (a Chapter
+    // card holding a list of Entry rows), but for a table of contents instead of a schedule —
+    // Chapter/Entry titles are typed as plain text (no manual numbering needed); the "1. " /
+    // "3.1. " numbering the final chart actually shows is generated purely from each item's
+    // position in this tree when the data is serialized (see collectIndexDataString), and
+    // stripped back off when reading existing data back in (setIndexDataFromString) so the
+    // input fields always show clean text, never a stale or duplicated number.
+    let indexChapters = []
+    function newIndexChapter() {
+      return { title: '', page: '', collapsed: false, subs: [] }
+    }
+    function newIndexSub() {
+      return { title: '', subtitle: '', page: '' }
+    }
+
+    function addIndexChapter() {
+      indexChapters.push(newIndexChapter())
+      renderIndexTree()
+      const cards = document.querySelectorAll('#index-tree .tl-phase-card')
+      const last = cards[cards.length - 1]
+      if (last) { const inp = last.querySelector('.tl-phase-label'); if (inp) inp.focus() }
+    }
+
+    function renderIndexTree() {
+      const container = document.getElementById('index-tree')
+      if (!container) return
+      container.innerHTML = ''
+      indexChapters.forEach((chapter, cIdx) => {
+        const card = document.createElement('div')
+        card.className = 'tl-phase-card'
+
+        const header = document.createElement('div')
+        header.className = 'tl-phase-header'
+
+        const toggleBtn = document.createElement('button')
+        toggleBtn.type = 'button'
+        toggleBtn.className = 'tl-collapse-btn'
+        toggleBtn.textContent = chapter.collapsed ? '▸' : '▾'
+        toggleBtn.title = chapter.collapsed ? 'Expand' : 'Collapse'
+        toggleBtn.addEventListener('click', () => { chapter.collapsed = !chapter.collapsed; renderIndexTree() })
+        header.appendChild(toggleBtn)
+
+        const labelInput = document.createElement('input')
+        labelInput.type = 'text'
+        labelInput.className = 'tl-phase-label'
+        labelInput.value = chapter.title
+        labelInput.placeholder = 'Chapter ' + (cIdx + 1)
+        labelInput.addEventListener('input', () => { chapter.title = labelInput.value })
+        header.appendChild(labelInput)
+
+        const pageInput = document.createElement('input')
+        pageInput.type = 'text'
+        pageInput.className = 'idx-page-input'
+        pageInput.value = chapter.page
+        pageInput.placeholder = 'Page'
+        pageInput.addEventListener('input', () => { chapter.page = pageInput.value })
+        header.appendChild(pageInput)
+
+        const delBtn = document.createElement('button')
+        delBtn.type = 'button'
+        delBtn.className = 'block-delete'
+        delBtn.innerHTML = deleteSvg
+        delBtn.title = 'Remove chapter'
+        delBtn.addEventListener('click', () => {
+          indexChapters.splice(cIdx, 1)
+          // Never leave the tree empty — always keep at least one chapter.
+          if (!indexChapters.length) indexChapters.push(newIndexChapter())
+          renderIndexTree()
+          reportHeight()
+        })
+        header.appendChild(delBtn)
+
+        card.appendChild(header)
+
+        if (!chapter.collapsed) {
+          const subList = document.createElement('div')
+          subList.className = 'tl-task-list'
+          chapter.subs.forEach((sub, sIdx) => {
+            const row = document.createElement('div')
+            row.className = 'tl-task-row'
+
+            const sTitle = document.createElement('input')
+            sTitle.type = 'text'
+            sTitle.className = 'tl-task-label'
+            sTitle.value = sub.title
+            sTitle.placeholder = 'Entry ' + (sIdx + 1)
+            sTitle.addEventListener('input', () => { sub.title = sTitle.value })
+            row.appendChild(sTitle)
+
+            const sSubtitle = document.createElement('input')
+            sSubtitle.type = 'text'
+            sSubtitle.className = 'idx-sub-subtitle-input'
+            sSubtitle.value = sub.subtitle
+            sSubtitle.placeholder = 'Subtitle'
+            sSubtitle.addEventListener('input', () => { sub.subtitle = sSubtitle.value })
+            row.appendChild(sSubtitle)
+
+            const sPage = document.createElement('input')
+            sPage.type = 'text'
+            sPage.className = 'idx-page-input'
+            sPage.value = sub.page
+            sPage.placeholder = 'Page'
+            sPage.addEventListener('input', () => { sub.page = sPage.value })
+            row.appendChild(sPage)
+
+            const sDel = document.createElement('button')
+            sDel.type = 'button'
+            sDel.className = 'block-delete'
+            sDel.innerHTML = deleteSvg
+            sDel.title = 'Remove entry'
+            sDel.addEventListener('click', () => {
+              chapter.subs.splice(sIdx, 1)
+              renderIndexTree()
+              reportHeight()
+            })
+            row.appendChild(sDel)
+
+            subList.appendChild(row)
+          })
+
+          const addSubBtn = document.createElement('button')
+          addSubBtn.type = 'button'
+          addSubBtn.className = 'add-btn tl-add-task'
+          addSubBtn.textContent = '+ Add entry'
+          addSubBtn.addEventListener('click', () => {
+            chapter.subs.push(newIndexSub())
+            renderIndexTree()
+            reportHeight()
+            const rows = card.querySelectorAll('.tl-task-row')
+            const lastRow = rows[rows.length - 1]
+            if (lastRow) { const inp = lastRow.querySelector('.tl-task-label'); if (inp) inp.focus() }
+          })
+          subList.appendChild(addSubBtn)
+          card.appendChild(subList)
+        }
+
+        container.appendChild(card)
+      })
+      reportHeight()
+    }
+
+    // A chapter's own number ("1. ", "2. "...) is its 1-based position among chapters; each of
+    // its entries gets "{chapter}.{entry}. " ahead of its own title, resetting per chapter —
+    // this is what lets drawIndexChart (code.ts) tell chapters and entries apart later, purely
+    // by reading how many numbers lead the title. A chapter with nothing in it (no title, no
+    // page, no entries) is skipped rather than emitting a bare, pointless row.
+    function collectIndexDataString() {
+      const rows = []
+      indexChapters.forEach((chapter, cIdx) => {
+        const chapterNum = cIdx + 1
+        const chapterTitle = chapter.title.trim()
+        const chapterPage = String(chapter.page || '').trim()
+        const hasSubs = chapter.subs.some(s => s.title.trim() || s.subtitle.trim() || String(s.page || '').trim())
+        if (chapterTitle || chapterPage || hasSubs) {
+          rows.push([chapterNum + '. ' + chapterTitle, '', chapterPage].join('\t'))
+        }
+        chapter.subs.forEach((sub, sIdx) => {
+          const subTitle = sub.title.trim()
+          const subSubtitle = sub.subtitle.trim()
+          const subPage = String(sub.page || '').trim()
+          if (!subTitle && !subSubtitle && !subPage) return
+          rows.push([chapterNum + '.' + (sIdx + 1) + '. ' + subTitle, subSubtitle, subPage].join('\t'))
+        })
+      })
+      return rows.join('\n')
+    }
+
+    // Reverse of the above: a row whose title starts with two numbers ("3.1. ...") is an entry
+    // under whichever chapter came just before it; a row with one leading number ("1. ...") —
+    // or no number at all, e.g. a flat legacy Index or data pasted without any — starts a new
+    // chapter instead, so nothing already-typed is ever silently dropped. Either way the
+    // leading number itself is stripped before it lands in the input field, since
+    // collectIndexDataString regenerates it fresh from tree position on the way back out.
+    function setIndexDataFromString(str) {
+      indexChapters = []
+      let current = null
+      const lines = String(str || '').split('\n').filter(l => l.trim().length > 0)
+      for (const line of lines) {
+        const cells = line.split('\t')
+        const rawTitle = (cells[0] || '').trim()
+        const subtitle = (cells[1] || '').trim()
+        const page = (cells[2] || '').trim()
+        const subMatch = rawTitle.match(/^\d+\.\d+\.\s*(.*)$/)
+        const chapterMatch = !subMatch && rawTitle.match(/^\d+\.\s*(.*)$/)
+        if (subMatch && current) {
+          current.subs.push({ title: subMatch[1], subtitle, page })
+        } else if (chapterMatch) {
+          current = { title: chapterMatch[1], page, collapsed: false, subs: [] }
+          indexChapters.push(current)
+        } else {
+          current = { title: rawTitle, page, collapsed: false, subs: [] }
+          indexChapters.push(current)
+        }
+      }
+      if (!indexChapters.length) indexChapters.push(newIndexChapter())
+      renderIndexTree()
+    }
+
     // Table: columns are free-form and user-named (unlike the fixed S1/S2 series columns),
     // since a table's columns can be any headers the user wants, not comparison series.
     // Column 0 doubles as the sticky "label" input every row already has. Defaults stay
@@ -918,18 +1135,21 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       document.getElementById('data-blocks').classList.toggle('table-mode', type === 'table')
       document.getElementById('column-labels').classList.toggle('table-mode', type === 'table')
       document.getElementById('data-blocks').classList.toggle('kpi-mode', type === 'kpi')
-      // Timeline uses its own dedicated Phase/Subtask accordion (#timeline-tree) instead of
-      // the generic row list — swap which one is visible, and the "+ Add" footer button
-      // along with it.
-      document.getElementById('genericDataScroll').style.display = (type === 'timeline') ? 'none' : ''
+      // Timeline and Index each use their own dedicated accordion editor (#timeline-tree /
+      // #index-tree) instead of the generic row list — swap which one is visible, and the
+      // "+ Add" footer button along with it.
+      document.getElementById('genericDataScroll').style.display = (type === 'timeline' || type === 'index') ? 'none' : ''
       document.getElementById('timeline-tree').style.display = (type === 'timeline') ? '' : 'none'
-      document.getElementById('addEntry').textContent = (type === 'timeline') ? '+ Add Phase' : '+ Add'
+      document.getElementById('index-tree').style.display = (type === 'index') ? '' : 'none'
+      document.getElementById('addEntry').textContent = (type === 'timeline') ? '+ Add Phase' : (type === 'index' ? '+ Add chapter' : '+ Add')
       // Any actual type change can change the value-column shape (count, or table's
       // user-named columns vs a plain single value) — always rebuild to match.
       if (oldType !== type) rebuildBlocksForMode()
       document.getElementById('overlappedField').style.display = (type === 'grouped' || type === 'progress') ? '' : 'none'
       document.getElementById('timelineFields').style.display = (type === 'timeline') ? '' : 'none'
       document.getElementById('budgetFields').style.display = (type === 'budget') ? '' : 'none'
+      const generateIndexBtn = document.getElementById('generateIndexBtn')
+      if (generateIndexBtn) generateIndexBtn.style.display = (type === 'index') ? '' : 'none'
     }
 
     document.getElementById('chartTypeGrid').addEventListener('click', (e) => {
@@ -1294,6 +1514,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     function setDataFromString(str, opts) {
       if (currentChartType === 'table' || currentChartType === 'kpi' || currentChartType === 'tree') { setTableDataFromString(str); return }
       if (currentChartType === 'timeline') { setTimelineDataFromString(str); return }
+      if (currentChartType === 'index') { setIndexDataFromString(str); return }
       opts = opts || {}
       const entries = parseDataString(str)
       if (opts.adoptSeriesCount && MULTI_SERIES_TYPES.includes(currentChartType)) {
@@ -1314,6 +1535,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       // would misread as two rows.
       if (currentChartType === 'table' || currentChartType === 'kpi' || currentChartType === 'tree') return collectTableDataString()
       if (currentChartType === 'timeline') return collectTimelineDataString()
+      if (currentChartType === 'index') return collectIndexDataString()
       const parts = []
       for (const row of document.querySelectorAll('#data-blocks .data-block')) {
         const label = row.querySelector('.block-label').value.trim()
@@ -1339,6 +1561,9 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     function jsonPlaceholderExample() {
       if (currentChartType === 'timeline') {
         return JSON.stringify({ phases: [{ label: 'Discovery', start: '2026-01-05', end: '2026-01-19', tasks: [{ label: 'Research', start: '2026-01-05', end: '2026-01-10' }] }] }, null, 2)
+      }
+      if (currentChartType === 'index') {
+        return JSON.stringify({ chapters: [{ title: 'Introduction', page: 1, subs: [{ title: 'Overview', subtitle: '', page: 2 }] }] }, null, 2)
       }
       if (currentChartType === 'table') {
         return JSON.stringify({ columns: tableColumnNames, rows: [['Design review', '2 weeks', 'UX']] }, null, 2)
@@ -1438,6 +1663,32 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       renderTimelineTree()
     }
 
+    function importIndexJson(json) {
+      if (json && Array.isArray(json.chapters)) {
+        indexChapters = json.chapters.map(c => ({
+          title: c && c.title !== undefined ? toCellString(c.title) : '',
+          page: c && c.page !== undefined ? toCellString(c.page) : '',
+          collapsed: false,
+          subs: Array.isArray(c && c.subs) ? c.subs.map(s => ({
+            title: s && s.title !== undefined ? toCellString(s.title) : '',
+            subtitle: s && s.subtitle !== undefined ? toCellString(s.subtitle) : '',
+            page: s && s.page !== undefined ? toCellString(s.page) : '',
+          })) : [],
+        }))
+        if (!indexChapters.length) indexChapters.push(newIndexChapter())
+        renderIndexTree()
+        return
+      }
+      if (Array.isArray(json)) {
+        // Same flat { title, subtitle, page } shape "Generate index" produces — chapter vs
+        // entry is inferred from each title's own leading number, same as that scan result.
+        const wire = json.map(e => [(e && e.title) || '', (e && e.subtitle) || '', e && e.page !== undefined && e.page !== null ? toCellString(e.page) : ''].join('\t')).join('\n')
+        setIndexDataFromString(wire)
+        return
+      }
+      throw new Error('Expected { "chapters": [{ "title", "page", "subs": [...] }] } or an array of { "title", "subtitle", "page" } objects.')
+    }
+
     // The "Import JSON" button hides itself while the box is open — Apply/Cancel down in
     // the panel are already the way to leave it, so keeping the button visible too would
     // just be a second, redundant way to do the same thing.
@@ -1449,6 +1700,18 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       const btn = document.getElementById('importJsonBtn')
       if (btn) btn.style.display = ''
     }
+
+    // Asks code.ts to scan the deck (Slides) or the current page's frames (Design/FigJam)
+    // for title/subtitle text and hand back {title, subtitle, page} rows — the button is
+    // disabled for the round trip since a large deck can take a moment to walk. The actual
+    // rows land via the 'index-data' message below, same as any other populated row list:
+    // still fully editable before Create.
+    document.getElementById('generateIndexBtn').addEventListener('click', () => {
+      const btn = document.getElementById('generateIndexBtn')
+      btn.textContent = 'Scanning…'
+      btn.disabled = true
+      parent.postMessage({ pluginMessage: { type: 'scan-index' } }, '*')
+    })
 
     document.getElementById('importJsonBtn').addEventListener('click', () => {
       const panel = document.getElementById('jsonImportPanel')
@@ -1484,6 +1747,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       }
       try {
         if (currentChartType === 'timeline') importTimelineJson(json)
+        else if (currentChartType === 'index') importIndexJson(json)
         else if (currentChartType === 'table') importTableJson(json)
         else if (currentChartType === 'kpi') importKpiJson(json)
         else if (MULTI_SERIES_TYPES.includes(currentChartType)) importMultiSeriesJson(json)
@@ -1500,6 +1764,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
 
     document.getElementById('addEntry').addEventListener('click', () => {
       if (currentChartType === 'timeline') addTimelinePhase()
+      else if (currentChartType === 'index') addIndexChapter()
       else addEntryRow()
     })
 
@@ -1605,9 +1870,26 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     let aestheticChosen = false
     let selectedAestheticCard = 'north'
 
+    // "View North JSON" while North is the selected card, "View current JSON" once a custom
+    // one has been pasted — the label always names whichever aesthetic Continue would
+    // actually apply.
+    function updateAestheticExportLabel() {
+      const btn = document.getElementById('aestheticExportBtn')
+      if (btn) btn.textContent = selectedAestheticCard === 'custom' ? 'View current JSON' : 'View North JSON'
+    }
+
+    function closeAestheticExportBox() {
+      const box = document.getElementById('aestheticExportBox')
+      const btn = document.getElementById('aestheticExportBtn')
+      if (box) box.style.display = 'none'
+      if (btn) btn.style.display = ''
+    }
+
     function showAestheticScreen() {
       const el = document.getElementById('aestheticScreen')
       if (el) el.style.display = 'flex'
+      closeAestheticExportBox()
+      updateAestheticExportLabel()
       reportHeight()
     }
     function hideAestheticScreen() {
@@ -1647,6 +1929,8 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
         if (selectedAestheticCard === 'custom') {
           document.getElementById('aestheticJsonText').placeholder = JSON.stringify({ color: '#0A84FF', theme: 'dark', displayFont: 'Playfair Display', textFont: 'Inter' }, null, 2)
         }
+        updateAestheticExportLabel()
+        closeAestheticExportBox()
         reportHeight()
       })
     })
@@ -1677,6 +1961,8 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
 
     // Always reads the *live* color/theme/font state (not just whatever was picked when the
     // screen last opened), so it reflects any tweak made afterward in the main Color section.
+    // The button itself hides once the box is showing — the × is the only way back, so there's
+    // never two visible controls doing the same job at once.
     document.getElementById('aestheticExportBtn').addEventListener('click', () => {
       const exportEl = document.getElementById('aestheticExportText')
       // colorToHex appends an alpha byte (RRGGBBAA) for internal round-tripping elsewhere in
@@ -1685,10 +1971,15 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       const color6 = colorToHex(colorValue('barColor')).slice(0, 7)
       const json = JSON.stringify({ color: color6, theme: currentTheme, displayFont: displayFontFamily, textFont: textFontFamily }, null, 2)
       exportEl.value = json
-      exportEl.style.display = 'block'
+      document.getElementById('aestheticExportBox').style.display = 'block'
+      document.getElementById('aestheticExportBtn').style.display = 'none'
       exportEl.focus()
       exportEl.select()
       try { document.execCommand('copy') } catch (e) { /* selection still lets the user copy manually */ }
+      reportHeight()
+    })
+    document.getElementById('aestheticExportClose').addEventListener('click', () => {
+      closeAestheticExportBox()
       reportHeight()
     })
 
@@ -1726,6 +2017,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       document.getElementById('vatShowTotal').checked = false
       tableColumnNames = ['Column 1', 'Column 2', 'Column 3']
       timelinePhases = []
+      indexChapters = []
       setSeriesCount(2)
       clearBlocks()
       createBlock(nextDataLabel(), defaultValues())
@@ -1741,6 +2033,23 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       const msg = event.data && event.data.pluginMessage
       if (!msg) return
       if (msg.type === 'run-complete') {
+        return
+      }
+      if (msg.type === 'index-data') {
+        const btn = document.getElementById('generateIndexBtn')
+        if (btn) { btn.textContent = 'Generate index'; btn.disabled = false }
+        const entries = Array.isArray(msg.entries) ? msg.entries : []
+        // An empty result (nothing found) leaves the tree as-is — code.ts already shows its
+        // own notify() toast for that case, so this just no-ops rather than wiping out
+        // chapters/entries the user may have started editing by hand. Scanned entries already
+        // carry the auto-generated "1. " / "3.1. " numbering (see scanIndexEntries in
+        // code.ts) — routing them through setIndexDataFromString's own chapter/entry
+        // detection rebuilds the tree from that numbering, same as reopening a saved chart.
+        if (entries.length) {
+          const wire = entries.map(e => [(e && e.title) || '', (e && e.subtitle) || '', e && e.page !== undefined && e.page !== null ? String(e.page) : ''].join('\t')).join('\n')
+          setIndexDataFromString(wire)
+          reportHeight()
+        }
         return
       }
       if (msg.type === 'params-change' && msg.params) {
