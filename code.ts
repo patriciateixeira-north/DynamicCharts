@@ -1,5 +1,5 @@
 type ToolColor = { r: number; g: number; b: number; a: number }
-type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string; displayFontFamily?: string; textFontFamily?: string }
+type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string; displayFontFamily?: string; textFontFamily?: string; indexLastContentPage?: number }
 const TOOL_ID = "b7b8983d-a536-4eeb-b76e-89d2f24bca63"
 const DISPLAY_NAME = "Dynamic Charts"
 const CHART_DATA_KEY = 'chartData'
@@ -905,10 +905,21 @@ figma.ui.onmessage = async (msg) => {
   }
 
   if (msg.type === 'scan-index') {
-    let entries: IndexEntry[] = []
-    try { entries = await scanIndexEntries() } catch { /* fall through with an empty result */ }
-    if (!entries.length) figma.notify('No slides or frames with text were found')
-    figma.ui.postMessage({ type: 'index-data', entries })
+    let result: IndexScanResult = { entries: [], scannedCount: 0, sizesSeen: [], lastContentPage: 0 }
+    try { result = await scanIndexEntries() } catch { /* fall through with an empty result */ }
+    if (!result.entries.length) {
+      // Diagnostic toast for the empty case — tells you WHY nothing came back instead of just
+      // that nothing did: whether anything got scanned at all, and what sizes it actually saw
+      // if neither the 120px chapter size nor the 65px sub size showed up anywhere.
+      if (result.scannedCount === 0) {
+        figma.notify('No slides or frames found to scan')
+      } else if (result.sizesSeen.length) {
+        figma.notify(`Scanned ${result.scannedCount} slide(s) — no title at ${INDEX_CHAPTER_FONT_SIZE}px or ${INDEX_SUB_FONT_SIZE}px found. Sizes seen: ${result.sizesSeen.join('px, ')}px`)
+      } else {
+        figma.notify(`Scanned ${result.scannedCount} slide(s) — no text found at all`)
+      }
+    }
+    figma.ui.postMessage({ type: 'index-data', entries: result.entries, lastContentPage: result.lastContentPage })
     return
   }
 
@@ -925,6 +936,7 @@ figma.ui.onmessage = async (msg) => {
       tableColumns: typeof msg.tableColumns === 'string' ? msg.tableColumns : undefined,
       displayFontFamily: typeof msg.displayFontFamily === 'string' && msg.displayFontFamily.trim() ? msg.displayFontFamily.trim() : undefined,
       textFontFamily: typeof msg.textFontFamily === 'string' && msg.textFontFamily.trim() ? msg.textFontFamily.trim() : undefined,
+      indexLastContentPage: typeof msg.indexLastContentPage === 'number' && Number.isFinite(msg.indexLastContentPage) ? msg.indexLastContentPage : undefined,
     }
 
     // if editing an existing frame
@@ -1986,27 +1998,30 @@ async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
   return frame
 }
 
-// Tab-separated cells (Title / Subtitle / Page) per newline-separated row — same free-text-safe
-// format as Table/KPI, since a slide's title/subtitle routinely contains a literal comma or
-// colon that the shared comma-based format would misread as a row/field boundary.
-interface IndexRow { title: string; subtitle: string; page: string }
+// Tab-separated cells (Title / Page / Hidden) per newline-separated row — same free-text-safe
+// format as Table/KPI, since a slide's title routinely contains a literal comma or colon that
+// the shared comma-based format would misread as a row/field boundary. Hidden ('1' or empty)
+// is set from the UI's per-entry hide toggle — a hidden row is kept here (and in the saved
+// chart data) so it survives being reopened for editing, but drawIndexChart filters it out
+// before it ever reaches the drawn chart.
+interface IndexRow { title: string; page: string; hidden: boolean }
 function parseIndexRows(str: string): IndexRow[] {
   const out: IndexRow[] = []
   for (const line of String(str || '').split('\n')) {
     if (!line.trim()) continue
     const cells = line.split('\t')
     const title = (cells[0] || '').trim()
-    const subtitle = (cells[1] || '').trim()
-    const page = (cells[2] || '').trim()
-    if (!title && !subtitle && !page) continue
-    out.push({ title, subtitle, page })
+    const page = (cells[1] || '').trim()
+    const hidden = cells[2] === '1'
+    if (!title && !page) continue
+    out.push({ title, page, hidden })
   }
   return out
 }
 
 // Recursively collects every TEXT node under a container (a slide, or a top-level frame) —
-// used by detectTitleSubtitle below to find candidate title/subtitle text regardless of how
-// deeply it's nested inside groups/frames.
+// used by detectSlideContent below to find a candidate title regardless of how deeply it's
+// nested inside groups/frames.
 function collectTextNodes(node: SceneNode, out: TextNode[]): void {
   if (node.type === 'TEXT') { out.push(node); return }
   if ('children' in node) {
@@ -2025,66 +2040,61 @@ function textNodeFontSize(t: TextNode): number {
   } catch { return 0 }
 }
 
-// North's own slide type scale: a numbered section-cover title sits at 120px, the regular
-// H2/title style at 62px, the subtitle style at 26px — matching on these exact sizes is far
-// more reliable than "biggest text on the slide", which can mis-fire on a slide with an
-// oversized decorative number or eyebrow label set larger than the actual headline.
+// A slide/frame becomes a CHAPTER when it has "numbered" text at North's own 120px
+// section-title size — "numbered" meaning either of two different things a deck might
+// actually do: text literally typed as "1. Introduction", OR (as this deck actually uses) a
+// paragraph with Figma's own Ordered List style applied, where the "1." is a rendered list
+// marker and never appears in the text's own characters at all. Only the literal-digit case
+// keeps its own written number as-is later in scanIndexEntries (an ordered-list title has no
+// number of its own to keep, since none of it is real text). Absent a chapter match, a slide
+// becomes a nested SUB-entry instead when it has plain text at North's 65px sub-title size —
+// no numbering of any kind required there, since scanIndexEntries generates that number
+// itself from the sub's position under its chapter.
+const INDEX_NUMBER_RE = /^\d+\.\s*/
 const INDEX_CHAPTER_FONT_SIZE = 120
-const INDEX_TITLE_FONT_SIZE = 62
-const INDEX_SUBTITLE_FONT_SIZE = 26
-// A 120px title only counts as a chapter cover when it's actually numbered ("1. Introduction")
-// — a 120px title without a leading number is just an oversized regular title, not a section
-// divider, and falls through to the normal title/subtitle detection below.
-const CHAPTER_NUMBER_RE = /^\d+\.\s*/
-// Distinguishes an auto-numbered sub-entry ("3.1. Content") from a chapter/plain entry
-// ("1. Introduction", or an unnumbered title) at RENDER time (see drawIndexChart) — a chapter
-// title only ever has ONE leading number, a sub-entry always has TWO. This is also what makes
-// the hierarchy fully user-editable: typing or removing a number in the UI's Title field
-// before hitting Create changes how that row renders, same as anything auto-detected.
+const INDEX_SUB_FONT_SIZE = 65
+// Distinguishes an auto-numbered sub-entry ("3.1. Content") from a chapter ("1. Introduction")
+// at RENDER time (see drawIndexChart) — a chapter title only ever has ONE leading number, a
+// sub-entry always has TWO. This also makes the hierarchy fully user-editable: typing or
+// removing a number in the UI's Title field before hitting Create changes how that row
+// renders, same as anything auto-detected.
 const SUB_ENTRY_NUMBER_RE = /^\d+\.\d+\./
 
-// Not a real semantic lookup — Figma has no notion of "this text is the title" — but a
-// deliberate match against this deck's own type scale, nothing guessed. A numbered 120px
-// title is a chapter cover (kind: 'chapter'); otherwise, if the slide has no text at the
-// title size, whatever text IS at the subtitle size becomes the title instead (a slide whose
-// only heading happens to use the subtitle style still gets a real title, rather than that
-// text landing in the subtitle column and the title column being padded with something made
-// up) — subtitle is left blank in that case, since the one heading found is already accounted
-// for as the title. A slide with none of these gets kind: 'none' and is skipped entirely.
-function detectSlideContent(container: SceneNode): { kind: 'chapter' | 'entry' | 'none'; title: string; subtitle: string } {
-  const texts: TextNode[] = []
-  collectTextNodes(container, texts)
-  const withSize = texts
-    .map(t => ({ text: t.characters.trim(), size: textNodeFontSize(t) }))
-    .filter(t => t.text.length > 0)
-
-  const findBySize = (target: number) => withSize.find(t => Math.round(t.size) === target)
-
-  const chapterMatch = findBySize(INDEX_CHAPTER_FONT_SIZE)
-  if (chapterMatch && CHAPTER_NUMBER_RE.test(chapterMatch.text)) {
-    return { kind: 'chapter', title: chapterMatch.text, subtitle: '' }
-  }
-
-  const titleMatch = findBySize(INDEX_TITLE_FONT_SIZE)
-  if (titleMatch) {
-    const subtitleMatch = findBySize(INDEX_SUBTITLE_FONT_SIZE)
-    return { kind: 'entry', title: titleMatch.text, subtitle: subtitleMatch ? subtitleMatch.text : '' }
-  }
-  const subtitleAsTitle = findBySize(INDEX_SUBTITLE_FONT_SIZE)
-  if (subtitleAsTitle) return { kind: 'entry', title: subtitleAsTitle.text, subtitle: '' }
-
-  // Nothing at the deck's expected sizes at all — rather than skip this slide and leave it
-  // uncounted between one chapter and the next, fall back to the largest text on it. Every
-  // slide between two chapter covers should show up as an entry, even one that doesn't
-  // follow the usual type scale.
-  if (withSize.length) {
-    const bySize = [...withSize].sort((a, b) => b.size - a.size)
-    return { kind: 'entry', title: bySize[0].text, subtitle: '' }
-  }
-  return { kind: 'none', title: '', subtitle: '' }
+// Figma's ordered-list marker isn't part of a text node's own characters — this is the only
+// way to tell a list-formatted paragraph apart from plain text. Checked at a single position
+// (not the full range) since list formatting is a paragraph-level attribute that wouldn't
+// usefully vary character-by-character the way font size can; getRangeListOptions still
+// returns figma.mixed if that position hasn't resolved for some reason, hence the guard.
+function isOrderedListText(t: TextNode): boolean {
+  try {
+    const opts = t.getRangeListOptions(0, 1)
+    return opts !== figma.mixed && opts.type === 'ORDERED'
+  } catch { return false }
 }
 
-interface IndexEntry { title: string; subtitle: string; page: number }
+// Also reports every font size seen on the slide at all, even when nothing matches either
+// expected size — purely diagnostic, surfaced as a notify() toast when a scan comes back
+// empty (see the 'scan-index' handler below) so a mismatch between what this expects and what
+// a real deck actually uses is visible instead of a silent empty result.
+function detectSlideContent(container: SceneNode): { kind: 'chapter' | 'sub' | 'none'; title: string; sizesSeen: number[] } {
+  const texts: TextNode[] = []
+  collectTextNodes(container, texts)
+  const withInfo = texts
+    .map(t => ({ text: t.characters.trim(), size: Math.round(textNodeFontSize(t)), ordered: isOrderedListText(t) }))
+    .filter(t => t.text.length > 0)
+  const sizesSeen = withInfo.map(t => t.size)
+
+  const chapterMatch = withInfo.find(t => t.size === INDEX_CHAPTER_FONT_SIZE && (INDEX_NUMBER_RE.test(t.text) || t.ordered))
+  if (chapterMatch) return { kind: 'chapter', title: chapterMatch.text, sizesSeen }
+
+  const subMatch = withInfo.find(t => t.size === INDEX_SUB_FONT_SIZE)
+  if (subMatch) return { kind: 'sub', title: subMatch.text, sizesSeen }
+
+  return { kind: 'none', title: '', sizesSeen }
+}
+
+interface IndexEntry { title: string; page: number }
+interface IndexScanResult { entries: IndexEntry[]; scannedCount: number; sizesSeen: number[]; lastContentPage: number }
 
 // Figma Slides: the deck's slides live inside the current page's SLIDE_GRID -> SLIDE_ROW ->
 // SLIDE hierarchy, in presentation order — flattened here into a single 1-based page count.
@@ -2093,28 +2103,36 @@ interface IndexEntry { title: string; subtitle: string; page: number }
 // lists itself), ordered by reading position — top-to-bottom then left-to-right — since raw
 // sibling order rarely matches how frames are actually laid out to be read.
 //
-// A chapter cover resets the sub-numbering; every regular entry between one chapter cover and
-// the next is auto-numbered "{chapter}.{sub}. " ahead of its own detected title (e.g. the 3rd
-// entry after the 3rd chapter cover becomes "3.3. Whatever this slide's title says") — that
-// two-part number is what drawIndexChart later reads back to render it small and indented
-// under its chapter. A deck with no 120px chapter covers at all never triggers this — every
-// entry just keeps its own plain title, same flat list as before this feature existed.
-async function scanIndexEntries(): Promise<IndexEntry[]> {
+// A chapter resets the sub-numbering; every sub-entry found between one chapter and the next
+// is auto-numbered "{chapter}.{sub}. " ahead of its own detected title — that two-part number
+// is what drawIndexChart later reads back to render it small and indented under its chapter.
+// A sub-entry found before any chapter has no chapter to nest under and is dropped.
+async function scanIndexEntries(): Promise<IndexScanResult> {
   const entries: IndexEntry[] = []
+  const sizesSeen = new Set<number>()
+  let scannedCount = 0
+  let totalPages = 0
   let chapterCounter = 0
   let subCounter = 0
 
   const handleContainer = (container: SceneNode, page: number) => {
+    scannedCount++
+    totalPages = Math.max(totalPages, page)
     const detected = detectSlideContent(container)
+    detected.sizesSeen.forEach(s => sizesSeen.add(s))
     if (detected.kind === 'chapter') {
       chapterCounter++
       subCounter = 0
-      entries.push({ title: detected.title, subtitle: '', page })
-    } else if (detected.kind === 'entry') {
-      const title = chapterCounter > 0 ? `${chapterCounter}.${++subCounter}. ${detected.title}` : detected.title
-      entries.push({ title, subtitle: detected.subtitle, page })
+      // A literally-typed number ("17. Reuniones") is kept exactly as written; an
+      // ordered-list title (just "People") has no number of its own, so one is generated
+      // here from this chapter's own position in the index instead.
+      const displayTitle = INDEX_NUMBER_RE.test(detected.title) ? detected.title : `${chapterCounter}. ${detected.title}`
+      entries.push({ title: displayTitle, page })
+    } else if (detected.kind === 'sub' && chapterCounter > 0) {
+      subCounter++
+      entries.push({ title: `${chapterCounter}.${subCounter}. ${detected.title}`, page })
     }
-    // kind 'none': no matching text on this slide/frame at all — skipped, not counted.
+    // kind 'none', or a sub found before any chapter: skipped, not counted.
   }
 
   if (figma.editorType === 'slides') {
@@ -2135,24 +2153,27 @@ async function scanIndexEntries(): Promise<IndexEntry[]> {
     frames.sort((a, b) => (Math.round(a.y / 10) - Math.round(b.y / 10)) || (a.x - b.x))
     frames.forEach((f, i) => handleContainer(f, i + 1))
   }
-  return entries
+  // The deck's very last slide is assumed to be a back cover, not a real numbered section —
+  // excluded here so the final entry's page range (computed in drawIndexChart) doesn't
+  // needlessly stretch to include it.
+  const lastContentPage = Math.max(0, totalPages - 1)
+  return { entries, scannedCount, sizesSeen: [...sizesSeen].sort((a, b) => a - b), lastContentPage }
 }
 
-// Plain list, not a data table: each row is a title with the page number right-aligned at its
-// far edge — reuses Table's bordered-box + row-divider look (wrapRowInAnchor/
-// makeBoxListAdaptive) since that's this plugin's established visual language for "a list of
-// rows", but with fixed per-row content instead of Table's N free-form columns.
-//
-// Two-tier hierarchy: a row whose title starts with a two-part number ("3.1. ...", written by
-// scanIndexEntries — see SUB_ENTRY_NUMBER_RE) is a sub-entry under whichever chapter came
-// before it — rendered smaller, indented, and without a divider before it, so it visually
-// nests under that chapter. Every other row (a chapter cover, or a plain unnumbered title in a
-// deck that never uses the chapter convention at all) renders full-size, and gets a divider
-// before it to close off the previous group — except the very first row. This reads straight
-// off whatever the Title column actually says, so a manual edit to that number before Create
-// changes how the row renders, exactly like anything auto-detected.
+// Plain list, not a data table: each numbered title is its own full-size row, divided from
+// the next, with the page column reading as a range from that section's own page through the
+// page right before the NEXT section starts — so it reflects the whole span that section
+// actually covers, not just the one slide it was found on. The last row has nothing after it
+// to bound the range, so it just shows its own page. Reuses Table's bordered-box +
+// row-divider look (wrapRowInAnchor/makeBoxListAdaptive), this plugin's established visual
+// language for "a list of rows".
 async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
-  const rows = parseIndexRows(data.data)
+  const allRows = parseIndexRows(data.data)
+  if (!allRows.length) { figma.notify('No data'); return null }
+  // Hidden rows are kept in the saved data (see parseIndexRows) but never drawn — filtered
+  // out here, before anything downstream (chapter grouping, page ranges, dividers) ever sees
+  // them, so a hidden entry has no effect on the chart at all beyond simply not appearing.
+  const rows = allRows.filter(r => !r.hidden)
   if (!rows.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -2167,8 +2188,8 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
   const SUB_PAGE_SIZE = TICK_LABEL_FONT_SIZE - 4
   const SUB_INDENT = 36
   const ROW_V_PAD = 24
-  // Wider than a single-page column would need, since a chapter row's page cell can read as
-  // a range ("12-48") once its entries are accounted for — see the loop below.
+  // Wider than a single-page column would need, since a row's page cell can read as a range
+  // ("12-48") once the next section's page is accounted for — see the loop below.
   const PAGE_COL_WIDTH = 130
 
   const defaultWidth = 1100
@@ -2191,12 +2212,11 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(d)
   }
 
-  // Subtitle is scanned and kept editable in the UI's data table, but deliberately left out
-  // of the drawn chart itself — the visual index is just Title + Page, one line per row.
   let curY = paddingTop + ROW_V_PAD
   for (let r = 0; r < rows.length; r++) {
     const row = rows[r]
     const isSub = SUB_ENTRY_NUMBER_RE.test(row.title)
+    const isLastRow = r === rows.length - 1
 
     // A new chapter group starts here — close off the previous one with a divider, unless
     // this is the very first row (the box border already closes that off on its own).
@@ -2208,7 +2228,9 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
     const indent = isSub ? SUB_INDENT : 0
     const titleSize = isSub ? SUB_TITLE_SIZE : TITLE_SIZE
     const titleFont = isSub ? MODERAT_REGULAR : MODERAT_MEDIUM
-    const titleColor = isSub ? theme.muted : theme.text
+    // Sub-entries stay smaller and indented, but keep the theme's main text color (not muted
+    // gray) — black on Positive, white on Negative, same as the chapter titles above them.
+    const titleColor = theme.text
     const pageSize = isSub ? SUB_PAGE_SIZE : PAGE_SIZE
 
     const titleTxt = await createTextNode(row.title, titleFont, titleSize, titleColor)
@@ -2219,17 +2241,16 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
 
     const rowH = titleTxt.height || titleSize
 
-    // A chapter spans more than its own single page — its page cell reads as a range through
-    // wherever it actually ends (a sub-entry's own page always stays a single number, only
-    // chapters get this treatment). The true end of that span is the page right before the
-    // NEXT chapter starts — not just the highest page among this chapter's own detected
-    // entries — so the range still comes out right even if some slide in between never
-    // produced its own entry row. Only the last chapter (nothing follows it) falls back to
-    // its entries' highest page; falls back further to the plain page number if none of this
-    // can be read as numbers, or the range would be degenerate.
+    const startNum = parseInt(row.page, 10)
     let pageLabel = row.page || String(r + 1)
+
     if (!isSub) {
-      const startNum = parseInt(row.page, 10)
+      // Chapter: the true end of its span is the page right before the NEXT chapter starts —
+      // not just the highest page among its own entries — so the range comes out right even
+      // if some slide in between never produced its own entry row. The last chapter (nothing
+      // follows it) reaches to the deck's own last content page instead (from a "Generate
+      // index" scan; excludes the back cover), falling back further to its entries' own
+      // highest page if that isn't available.
       let nextChapterIdx = rows.length
       for (let k = r + 1; k < rows.length; k++) {
         if (!SUB_ENTRY_NUMBER_RE.test(rows[k].title)) { nextChapterIdx = k; break }
@@ -2238,6 +2259,9 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
       if (nextChapterIdx < rows.length) {
         const nextStart = parseInt(rows[nextChapterIdx].page, 10)
         if (Number.isFinite(nextStart)) endNum = nextStart - 1
+      }
+      if (!Number.isFinite(endNum) && typeof data.indexLastContentPage === 'number' && data.indexLastContentPage > startNum) {
+        endNum = data.indexLastContentPage
       }
       if (!Number.isFinite(endNum)) {
         endNum = startNum
@@ -2249,9 +2273,13 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
       if (Number.isFinite(startNum) && Number.isFinite(endNum) && endNum > startNum) {
         pageLabel = `${startNum}-${endNum}`
       }
+    } else if (isLastRow && typeof data.indexLastContentPage === 'number' && Number.isFinite(startNum) && data.indexLastContentPage > startNum) {
+      // The very last row overall, even if it's a sub-entry — nothing follows it either, so
+      // it gets the same deck-end treatment a trailing chapter would.
+      pageLabel = `${startNum}-${data.indexLastContentPage}`
     }
 
-    const pageTxt = await createTextNode(pageLabel, MODERAT_REGULAR, pageSize, theme.muted)
+    const pageTxt = await createTextNode(pageLabel, MODERAT_REGULAR, pageSize, theme.text)
     pageTxt.textAlignHorizontal = 'RIGHT'
     pageTxt.textAutoResize = 'HEIGHT'
     pageTxt.resize(Math.max(1, PAGE_COL_WIDTH - CELL_PAD_LEFT - CELL_PAD_RIGHT), pageTxt.height || pageSize)
