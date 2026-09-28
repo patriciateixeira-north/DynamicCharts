@@ -1,5 +1,5 @@
 type ToolColor = { r: number; g: number; b: number; a: number }
-type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string }
+type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string; displayFontFamily?: string; textFontFamily?: string; indexLastContentPage?: number }
 const TOOL_ID = "b7b8983d-a536-4eeb-b76e-89d2f24bca63"
 const DISPLAY_NAME = "Dynamic Charts"
 const CHART_DATA_KEY = 'chartData'
@@ -494,11 +494,18 @@ function createAnchoredDot(x: number, y: number, size: number, color: ToolColor)
   return anchor
 }
 
-const NOE_REGULAR: FontName = { family: 'Noe Display', style: 'Regular' }
-const NOE_BOLD: FontName = { family: 'Noe Display', style: 'Bold' }
-const MODERAT_LIGHT: FontName = { family: 'Moderat', style: 'Light' }
-const MODERAT_REGULAR: FontName = { family: 'Moderat', style: 'Regular' }
-const MODERAT_MEDIUM: FontName = { family: 'Moderat', style: 'Medium' }
+// North's own defaults. An aesthetic JSON pasted in the UI can override the family names
+// (see applyFontFamilies below); these five FontName vars are what every draw* function
+// and text helper in this file actually reads from, so overriding them once per draw call
+// is all a custom aesthetic needs to reach every text node without threading a font
+// parameter through every helper.
+const DEFAULT_DISPLAY_FONT_FAMILY = 'Noe Display'
+const DEFAULT_TEXT_FONT_FAMILY = 'Moderat'
+let NOE_REGULAR: FontName = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Regular' }
+let NOE_BOLD: FontName = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Bold' }
+let MODERAT_LIGHT: FontName = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Light' }
+let MODERAT_REGULAR: FontName = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Regular' }
+let MODERAT_MEDIUM: FontName = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Medium' }
 const GRAY_TEXT: ToolColor = { r: 0.42, g: 0.42, b: 0.44, a: 1 }
 const GRID_COLOR: ToolColor = { r: 0.88, g: 0.88, b: 0.88, a: 1 }
 const BLACK: ToolColor = { r: 0.07, g: 0.07, b: 0.07, a: 1 }
@@ -521,7 +528,43 @@ function getTheme(mode: ChartData['theme']): Theme {
   return mode === 'dark' ? DARK_THEME : LIGHT_THEME
 }
 
-async function loadFonts(): Promise<void> {
+// Resolves the chart's font families for this draw call (North's defaults, or whatever an
+// aesthetic JSON pasted in the UI asked for) into the five module-level FontName vars above,
+// then loads them. A custom family that isn't actually installed in the user's Figma account
+// would otherwise only surface as a cryptic failure deep inside some later text-creation
+// call — so the regular weight is loaded and validated *here*, up front, with a clear
+// fallback to North's own fonts if it's missing.
+async function applyFontFamilies(data: ChartData): Promise<void> {
+  const wantedDisplay = data.displayFontFamily && data.displayFontFamily.trim() ? data.displayFontFamily.trim() : DEFAULT_DISPLAY_FONT_FAMILY
+  const wantedText = data.textFontFamily && data.textFontFamily.trim() ? data.textFontFamily.trim() : DEFAULT_TEXT_FONT_FAMILY
+
+  NOE_REGULAR = { family: wantedDisplay, style: 'Regular' }
+  NOE_BOLD = { family: wantedDisplay, style: 'Bold' }
+  if (wantedDisplay !== DEFAULT_DISPLAY_FONT_FAMILY) {
+    try { await figma.loadFontAsync(NOE_REGULAR) }
+    catch {
+      figma.notify(`Font "${wantedDisplay}" not found — using ${DEFAULT_DISPLAY_FONT_FAMILY} instead`)
+      NOE_REGULAR = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Regular' }
+      NOE_BOLD = { family: DEFAULT_DISPLAY_FONT_FAMILY, style: 'Bold' }
+    }
+  }
+
+  MODERAT_LIGHT = { family: wantedText, style: 'Light' }
+  MODERAT_REGULAR = { family: wantedText, style: 'Regular' }
+  MODERAT_MEDIUM = { family: wantedText, style: 'Medium' }
+  if (wantedText !== DEFAULT_TEXT_FONT_FAMILY) {
+    try { await figma.loadFontAsync(MODERAT_REGULAR) }
+    catch {
+      figma.notify(`Font "${wantedText}" not found — using ${DEFAULT_TEXT_FONT_FAMILY} instead`)
+      MODERAT_LIGHT = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Light' }
+      MODERAT_REGULAR = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Regular' }
+      MODERAT_MEDIUM = { family: DEFAULT_TEXT_FONT_FAMILY, style: 'Medium' }
+    }
+  }
+}
+
+async function loadFonts(data: ChartData): Promise<void> {
+  await applyFontFamilies(data)
   await figma.loadFontAsync(NOE_REGULAR)
   await figma.loadFontAsync(MODERAT_LIGHT)
   try { await figma.loadFontAsync(NOE_BOLD) } catch { /* fallback to regular */ }
@@ -650,7 +693,7 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
     figma.notify('No data entries to draw')
     return null
   }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const paddingLeft = 140
@@ -861,6 +904,25 @@ figma.ui.onmessage = async (msg) => {
     return
   }
 
+  if (msg.type === 'scan-index') {
+    let result: IndexScanResult = { entries: [], scannedCount: 0, sizesSeen: [], lastContentPage: 0 }
+    try { result = await scanIndexEntries() } catch { /* fall through with an empty result */ }
+    if (!result.entries.length) {
+      // Diagnostic toast for the empty case — tells you WHY nothing came back instead of just
+      // that nothing did: whether anything got scanned at all, and what sizes it actually saw
+      // if neither the 120px chapter size nor the 65px sub size showed up anywhere.
+      if (result.scannedCount === 0) {
+        figma.notify('No slides or frames found to scan')
+      } else if (result.sizesSeen.length) {
+        figma.notify(`Scanned ${result.scannedCount} slide(s) — no title at ${INDEX_CHAPTER_FONT_SIZE}px or ${INDEX_SUB_FONT_SIZE}px found. Sizes seen: ${result.sizesSeen.join('px, ')}px`)
+      } else {
+        figma.notify(`Scanned ${result.scannedCount} slide(s) — no text found at all`)
+      }
+    }
+    figma.ui.postMessage({ type: 'index-data', entries: result.entries, lastContentPage: result.lastContentPage })
+    return
+  }
+
   if (msg.type === 'run') {
     const params: ChartData = {
       chartType: msg.chartType || DEFAULTS.chartType,
@@ -872,6 +934,9 @@ figma.ui.onmessage = async (msg) => {
       vatIncluded: !!msg.vatIncluded,
       vatShowTotal: !!msg.vatShowTotal,
       tableColumns: typeof msg.tableColumns === 'string' ? msg.tableColumns : undefined,
+      displayFontFamily: typeof msg.displayFontFamily === 'string' && msg.displayFontFamily.trim() ? msg.displayFontFamily.trim() : undefined,
+      textFontFamily: typeof msg.textFontFamily === 'string' && msg.textFontFamily.trim() ? msg.textFontFamily.trim() : undefined,
+      indexLastContentPage: typeof msg.indexLastContentPage === 'number' && Number.isFinite(msg.indexLastContentPage) ? msg.indexLastContentPage : undefined,
     }
 
     // if editing an existing frame
@@ -909,6 +974,7 @@ figma.ui.onmessage = async (msg) => {
       else if (params.chartType === 'timeline') newFrame = await drawTimelineChart(params)
       else if (params.chartType === 'budget') newFrame = await drawBudgetChart(params)
       else if (params.chartType === 'table') newFrame = await drawTableChart(params)
+      else if (params.chartType === 'index') newFrame = await drawIndexChart(params)
       else if (params.chartType === 'kpi') newFrame = await drawKpiChart(params)
       else if (params.chartType === 'funnel') newFrame = await drawFunnelChart(params)
       else if (params.chartType === 'network') newFrame = await drawForceGraphChart(params)
@@ -947,6 +1013,7 @@ figma.ui.onmessage = async (msg) => {
     else if (params.chartType === 'timeline') await drawTimelineChart(params)
     else if (params.chartType === 'budget') await drawBudgetChart(params)
     else if (params.chartType === 'table') await drawTableChart(params)
+    else if (params.chartType === 'index') await drawIndexChart(params)
     else if (params.chartType === 'kpi') await drawKpiChart(params)
     else if (params.chartType === 'funnel') await drawFunnelChart(params)
     else if (params.chartType === 'network') await drawForceGraphChart(params)
@@ -994,7 +1061,7 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
   // the sequential points along the shared x-axis.
   const lines = parseMultiSeries(data.data)
   if (!lines.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const lineCount = lines.length
   const pointCount = lines[0].values.length
@@ -1127,7 +1194,7 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
 async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
   const rows = parseMultiSeries(data.data)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const seriesCount = rows[0].values.length
   const overlapped = !!data.overlapped
@@ -1250,7 +1317,7 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
 async function drawRadarChart(data: ChartData): Promise<FrameNode | null> {
   const rows = parseData(data.data)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const padding = 150
   const labelPad = 60
@@ -1340,7 +1407,7 @@ async function drawRadarChart(data: ChartData): Promise<FrameNode | null> {
 async function drawPieChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const size = 770
   const topOffset = 100
@@ -1409,7 +1476,7 @@ async function drawPieChart(data: ChartData): Promise<FrameNode | null> {
 async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const size = 715
   const topOffset = 100
@@ -1488,7 +1555,7 @@ async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
 async function drawProgressChart(data: ChartData): Promise<FrameNode | null> {
   const rows = parseMultiSeries(data.data)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const seriesCount = rows[0].values.length
   const overlapped = !!data.overlapped
@@ -1639,7 +1706,7 @@ function formatCurrency(n: number): string {
 async function drawBudgetChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   // VAT is a fixed 21% (Spain's standard rate) — not user-editable, so this never reads
@@ -1795,7 +1862,7 @@ function parseTableRows(dataStr: string, columnsStr: string | undefined): { colu
 async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
   const { columns, rows } = parseTableRows(data.data, data.tableColumns)
   if (!rows.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const paddingX = 50, paddingTop = 40, paddingBottom = 40
@@ -1928,6 +1995,330 @@ async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
   try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
   placeNewChartFrame(frame)
   figma.notify('Table created')
+  return frame
+}
+
+// Tab-separated cells (Title / Page / Hidden) per newline-separated row — same free-text-safe
+// format as Table/KPI, since a slide's title routinely contains a literal comma or colon that
+// the shared comma-based format would misread as a row/field boundary. Hidden ('1' or empty)
+// is set from the UI's per-entry hide toggle — a hidden row is kept here (and in the saved
+// chart data) so it survives being reopened for editing, but drawIndexChart filters it out
+// before it ever reaches the drawn chart.
+interface IndexRow { title: string; page: string; hidden: boolean }
+function parseIndexRows(str: string): IndexRow[] {
+  const out: IndexRow[] = []
+  for (const line of String(str || '').split('\n')) {
+    if (!line.trim()) continue
+    const cells = line.split('\t')
+    const title = (cells[0] || '').trim()
+    const page = (cells[1] || '').trim()
+    const hidden = cells[2] === '1'
+    if (!title && !page) continue
+    out.push({ title, page, hidden })
+  }
+  return out
+}
+
+// Recursively collects every TEXT node under a container (a slide, or a top-level frame) —
+// used by detectSlideContent below to find a candidate title regardless of how deeply it's
+// nested inside groups/frames.
+function collectTextNodes(node: SceneNode, out: TextNode[]): void {
+  if (node.type === 'TEXT') { out.push(node); return }
+  if ('children' in node) {
+    for (const child of node.children) collectTextNodes(child, out)
+  }
+}
+
+// TextNode.fontSize is the figma.mixed symbol when a single text node has more than one size
+// within it — falls back to reading just the first character's size in that case, rather than
+// treating the whole node as size 0 and never picking it as a title/subtitle candidate.
+function textNodeFontSize(t: TextNode): number {
+  if (typeof t.fontSize === 'number') return t.fontSize
+  try {
+    const s = t.getRangeFontSize(0, Math.max(1, t.characters.length))
+    return typeof s === 'number' ? s : 0
+  } catch { return 0 }
+}
+
+// A slide/frame becomes a CHAPTER when it has "numbered" text at North's own 120px
+// section-title size — "numbered" meaning either of two different things a deck might
+// actually do: text literally typed as "1. Introduction", OR (as this deck actually uses) a
+// paragraph with Figma's own Ordered List style applied, where the "1." is a rendered list
+// marker and never appears in the text's own characters at all. Only the literal-digit case
+// keeps its own written number as-is later in scanIndexEntries (an ordered-list title has no
+// number of its own to keep, since none of it is real text). Absent a chapter match, a slide
+// becomes a nested SUB-entry instead when it has plain text at North's 65px sub-title size —
+// no numbering of any kind required there, since scanIndexEntries generates that number
+// itself from the sub's position under its chapter.
+const INDEX_NUMBER_RE = /^\d+\.\s*/
+const INDEX_CHAPTER_FONT_SIZE = 120
+const INDEX_SUB_FONT_SIZE = 65
+// Distinguishes an auto-numbered sub-entry ("3.1. Content") from a chapter ("1. Introduction")
+// at RENDER time (see drawIndexChart) — a chapter title only ever has ONE leading number, a
+// sub-entry always has TWO. This also makes the hierarchy fully user-editable: typing or
+// removing a number in the UI's Title field before hitting Create changes how that row
+// renders, same as anything auto-detected.
+const SUB_ENTRY_NUMBER_RE = /^\d+\.\d+\./
+
+// Figma's ordered-list marker isn't part of a text node's own characters — this is the only
+// way to tell a list-formatted paragraph apart from plain text. Checked at a single position
+// (not the full range) since list formatting is a paragraph-level attribute that wouldn't
+// usefully vary character-by-character the way font size can; getRangeListOptions still
+// returns figma.mixed if that position hasn't resolved for some reason, hence the guard.
+function isOrderedListText(t: TextNode): boolean {
+  try {
+    const opts = t.getRangeListOptions(0, 1)
+    return opts !== figma.mixed && opts.type === 'ORDERED'
+  } catch { return false }
+}
+
+// Also reports every font size seen on the slide at all, even when nothing matches either
+// expected size — purely diagnostic, surfaced as a notify() toast when a scan comes back
+// empty (see the 'scan-index' handler below) so a mismatch between what this expects and what
+// a real deck actually uses is visible instead of a silent empty result.
+function detectSlideContent(container: SceneNode): { kind: 'chapter' | 'sub' | 'none'; title: string; sizesSeen: number[] } {
+  const texts: TextNode[] = []
+  collectTextNodes(container, texts)
+  const withInfo = texts
+    .map(t => ({ text: t.characters.trim(), size: Math.round(textNodeFontSize(t)), ordered: isOrderedListText(t) }))
+    .filter(t => t.text.length > 0)
+  const sizesSeen = withInfo.map(t => t.size)
+
+  const chapterMatch = withInfo.find(t => t.size === INDEX_CHAPTER_FONT_SIZE && (INDEX_NUMBER_RE.test(t.text) || t.ordered))
+  if (chapterMatch) return { kind: 'chapter', title: chapterMatch.text, sizesSeen }
+
+  const subMatch = withInfo.find(t => t.size === INDEX_SUB_FONT_SIZE)
+  if (subMatch) return { kind: 'sub', title: subMatch.text, sizesSeen }
+
+  return { kind: 'none', title: '', sizesSeen }
+}
+
+interface IndexEntry { title: string; page: number }
+interface IndexScanResult { entries: IndexEntry[]; scannedCount: number; sizesSeen: number[]; lastContentPage: number }
+
+// Figma Slides: the deck's slides live inside the current page's SLIDE_GRID -> SLIDE_ROW ->
+// SLIDE hierarchy, in presentation order — flattened here into a single 1-based page count.
+// Design/FigJam: no such structure exists, so each top-level frame on the current page stands
+// in for a "page" instead (this plugin's own chart frames are excluded so the index never
+// lists itself), ordered by reading position — top-to-bottom then left-to-right — since raw
+// sibling order rarely matches how frames are actually laid out to be read.
+//
+// A chapter resets the sub-numbering; every sub-entry found between one chapter and the next
+// is auto-numbered "{chapter}.{sub}. " ahead of its own detected title — that two-part number
+// is what drawIndexChart later reads back to render it small and indented under its chapter.
+// A sub-entry found before any chapter has no chapter to nest under and is dropped.
+async function scanIndexEntries(): Promise<IndexScanResult> {
+  const entries: IndexEntry[] = []
+  const sizesSeen = new Set<number>()
+  let scannedCount = 0
+  let totalPages = 0
+  let chapterCounter = 0
+  let subCounter = 0
+
+  const handleContainer = (container: SceneNode, page: number) => {
+    scannedCount++
+    totalPages = Math.max(totalPages, page)
+    const detected = detectSlideContent(container)
+    detected.sizesSeen.forEach(s => sizesSeen.add(s))
+    if (detected.kind === 'chapter') {
+      chapterCounter++
+      subCounter = 0
+      // A literally-typed number ("17. Reuniones") is kept exactly as written; an
+      // ordered-list title (just "People") has no number of its own, so one is generated
+      // here from this chapter's own position in the index instead.
+      const displayTitle = INDEX_NUMBER_RE.test(detected.title) ? detected.title : `${chapterCounter}. ${detected.title}`
+      entries.push({ title: displayTitle, page })
+    } else if (detected.kind === 'sub' && chapterCounter > 0) {
+      subCounter++
+      entries.push({ title: `${chapterCounter}.${subCounter}. ${detected.title}`, page })
+    }
+    // kind 'none', or a sub found before any chapter: skipped, not counted.
+  }
+
+  if (figma.editorType === 'slides') {
+    let page = 1
+    for (const gridChild of figma.currentPage.children) {
+      if (gridChild.type !== 'SLIDE_GRID') continue
+      for (const rowChild of gridChild.children) {
+        if (rowChild.type !== 'SLIDE_ROW') continue
+        for (const slide of rowChild.children) {
+          if (slide.type !== 'SLIDE') continue
+          handleContainer(slide, page)
+          page++
+        }
+      }
+    }
+  } else {
+    const frames = figma.currentPage.children.filter(c => c.type === 'FRAME' && !c.getPluginData(TOOL_ID)) as FrameNode[]
+    frames.sort((a, b) => (Math.round(a.y / 10) - Math.round(b.y / 10)) || (a.x - b.x))
+    frames.forEach((f, i) => handleContainer(f, i + 1))
+  }
+  // The deck's very last slide is assumed to be a back cover, not a real numbered section —
+  // excluded here so the final entry's page range (computed in drawIndexChart) doesn't
+  // needlessly stretch to include it.
+  const lastContentPage = Math.max(0, totalPages - 1)
+  return { entries, scannedCount, sizesSeen: [...sizesSeen].sort((a, b) => a - b), lastContentPage }
+}
+
+// Plain list, not a data table: each numbered title is its own full-size row, divided from
+// the next, with the page column reading as a range from that section's own page through the
+// page right before the NEXT section starts — so it reflects the whole span that section
+// actually covers, not just the one slide it was found on. The last row has nothing after it
+// to bound the range, so it just shows its own page. Reuses Table's bordered-box +
+// row-divider look (wrapRowInAnchor/makeBoxListAdaptive), this plugin's established visual
+// language for "a list of rows".
+async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
+  const allRows = parseIndexRows(data.data)
+  if (!allRows.length) { figma.notify('No data'); return null }
+  // Hidden rows are kept in the saved data (see parseIndexRows) but never drawn — filtered
+  // out here, before anything downstream (chapter grouping, page ranges, dividers) ever sees
+  // them, so a hidden entry has no effect on the chart at all beyond simply not appearing.
+  const rows = allRows.filter(r => !r.hidden)
+  if (!rows.length) { figma.notify('No data'); return null }
+  await loadFonts(data)
+  const theme = getTheme(data.theme)
+
+  const paddingX = 50, paddingTop = 40, paddingBottom = 40
+  const boxPadX = 28
+  const CELL_PAD_LEFT = 22
+  const CELL_PAD_RIGHT = 24
+  const TITLE_SIZE = TICK_LABEL_FONT_SIZE + 4
+  const SUB_TITLE_SIZE = TICK_LABEL_FONT_SIZE - 4
+  const PAGE_SIZE = TICK_LABEL_FONT_SIZE
+  const SUB_PAGE_SIZE = TICK_LABEL_FONT_SIZE - 4
+  const SUB_INDENT = 36
+  const ROW_V_PAD = 24
+  // Wider than a single-page column would need, since a row's page cell can read as a range
+  // ("12-48") once the next section's page is accounted for — see the loop below.
+  const PAGE_COL_WIDTH = 130
+
+  const defaultWidth = 1100
+  const { width: frameWidth } = resolveFrameSize(data, defaultWidth, 1)
+  const contentW = frameWidth - paddingX * 2
+  const boxInnerW = contentW - boxPadX * 2
+  const titleColWidth = boxInnerW - PAGE_COL_WIDTH
+  const colX0 = boxPadX
+  const colX1 = boxPadX + titleColWidth
+
+  const frame = figma.createFrame()
+  frame.name = 'Chart'
+  frame.fills = []
+  frame.clipsContent = false
+  frame.layoutMode = 'NONE'
+
+  const addDivider = async (y: number) => {
+    const d = await makeVectorPolyline([{ x: paddingX + boxPadX, y }, { x: paddingX + contentW - boxPadX, y }], theme.grid, 1)
+    d.name = 'row-divider'
+    frame.appendChild(d)
+  }
+
+  let curY = paddingTop + ROW_V_PAD
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r]
+    const isSub = SUB_ENTRY_NUMBER_RE.test(row.title)
+    const isLastRow = r === rows.length - 1
+
+    // A new chapter group starts here — close off the previous one with a divider, unless
+    // this is the very first row (the box border already closes that off on its own).
+    if (!isSub && r > 0) {
+      await addDivider(curY)
+      curY += ROW_V_PAD
+    }
+
+    const indent = isSub ? SUB_INDENT : 0
+    const titleSize = isSub ? SUB_TITLE_SIZE : TITLE_SIZE
+    const titleFont = isSub ? MODERAT_REGULAR : MODERAT_MEDIUM
+    // Sub-entries stay smaller and indented, but keep the theme's main text color (not muted
+    // gray) — black on Positive, white on Negative, same as the chapter titles above them.
+    const titleColor = theme.text
+    const pageSize = isSub ? SUB_PAGE_SIZE : PAGE_SIZE
+
+    const titleTxt = await createTextNode(row.title, titleFont, titleSize, titleColor)
+    titleTxt.textAutoResize = 'HEIGHT'
+    titleTxt.resize(Math.max(1, titleColWidth - CELL_PAD_LEFT - CELL_PAD_RIGHT - indent), titleTxt.height || titleSize)
+    titleTxt.x = colX0 + CELL_PAD_LEFT + indent
+    titleTxt.y = 0
+
+    const rowH = titleTxt.height || titleSize
+
+    const startNum = parseInt(row.page, 10)
+    let pageLabel = row.page || String(r + 1)
+
+    if (!isSub) {
+      // Chapter: the true end of its span is the page right before the NEXT chapter starts —
+      // not just the highest page among its own entries — so the range comes out right even
+      // if some slide in between never produced its own entry row. The last chapter (nothing
+      // follows it) reaches to the deck's own last content page instead (from a "Generate
+      // index" scan; excludes the back cover), falling back further to its entries' own
+      // highest page if that isn't available.
+      let nextChapterIdx = rows.length
+      for (let k = r + 1; k < rows.length; k++) {
+        if (!SUB_ENTRY_NUMBER_RE.test(rows[k].title)) { nextChapterIdx = k; break }
+      }
+      let endNum = NaN
+      if (nextChapterIdx < rows.length) {
+        const nextStart = parseInt(rows[nextChapterIdx].page, 10)
+        if (Number.isFinite(nextStart)) endNum = nextStart - 1
+      }
+      if (!Number.isFinite(endNum) && typeof data.indexLastContentPage === 'number' && data.indexLastContentPage > startNum) {
+        endNum = data.indexLastContentPage
+      }
+      if (!Number.isFinite(endNum)) {
+        endNum = startNum
+        for (let k = r + 1; k < nextChapterIdx; k++) {
+          const n = parseInt(rows[k].page, 10)
+          if (Number.isFinite(n) && n > endNum) endNum = n
+        }
+      }
+      if (Number.isFinite(startNum) && Number.isFinite(endNum) && endNum > startNum) {
+        pageLabel = `${startNum}-${endNum}`
+      }
+    } else if (isLastRow && typeof data.indexLastContentPage === 'number' && Number.isFinite(startNum) && data.indexLastContentPage > startNum) {
+      // The very last row overall, even if it's a sub-entry — nothing follows it either, so
+      // it gets the same deck-end treatment a trailing chapter would.
+      pageLabel = `${startNum}-${data.indexLastContentPage}`
+    }
+
+    const pageTxt = await createTextNode(pageLabel, MODERAT_REGULAR, pageSize, theme.text)
+    pageTxt.textAlignHorizontal = 'RIGHT'
+    pageTxt.textAutoResize = 'HEIGHT'
+    pageTxt.resize(Math.max(1, PAGE_COL_WIDTH - CELL_PAD_LEFT - CELL_PAD_RIGHT), pageTxt.height || pageSize)
+    pageTxt.x = colX1 + CELL_PAD_LEFT
+    pageTxt.y = Math.round(rowH / 2 - (pageTxt.height || pageSize) / 2)
+
+    wrapRowInAnchor(frame, [titleTxt, pageTxt], ['MIN', 'MAX'], paddingX, curY, contentW, rowH)
+    curY += rowH + ROW_V_PAD
+  }
+
+  const boxHeight = curY - paddingTop
+
+  const box = figma.createFrame()
+  box.name = 'box'
+  box.resize(Math.max(1, contentW), Math.max(1, boxHeight))
+  box.x = paddingX
+  box.y = paddingTop
+  box.fills = []
+  box.strokes = [solidPaint(theme.grid)]
+  box.strokeWeight = 1
+  try { box.cornerRadius = 4 } catch { }
+  box.clipsContent = false
+
+  const contentChildren = [...frame.children]
+  contentChildren.forEach(child => {
+    const c = child as SceneNode & { x: number; y: number }
+    c.x -= box.x
+    c.y -= box.y
+    box.appendChild(c)
+  })
+  frame.appendChild(box)
+
+  const frameHeight = Math.max(1, Math.round(paddingTop + boxHeight + paddingBottom))
+  frame.resize(frameWidth, frameHeight)
+
+  makeBoxListAdaptive(frame, box)
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  placeNewChartFrame(frame)
+  figma.notify('Index created')
   return frame
 }
 
@@ -2074,7 +2465,7 @@ async function drawKpiStat(parent: FrameNode, stat: KpiStat, x: number, y: numbe
 async function drawKpiChart(data: ChartData): Promise<FrameNode | null> {
   const stats = parseKpiRows(data.data)
   if (!stats.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
@@ -2288,7 +2679,7 @@ async function drawKpiChart(data: ChartData): Promise<FrameNode | null> {
 async function drawTimelineChart(data: ChartData): Promise<FrameNode | null> {
   const valid = parseTimelineRows(data.data)
   if (!valid.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const minStart = new Date(Math.min(...valid.map(r => r.start.getTime())))
@@ -2552,7 +2943,7 @@ async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
     figma.notify('No data entries to draw')
     return null
   }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const paddingLeft = 150
@@ -2653,7 +3044,7 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     figma.notify('No data entries to draw')
     return null
   }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
 
   const rowHeight = 90
@@ -2870,7 +3261,7 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
 async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
@@ -2962,7 +3353,7 @@ async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
 async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
   const entries = parseData(data.data)
   if (!entries.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
@@ -3082,7 +3473,7 @@ async function makeCurvedConnector(p1: { x: number; y: number }, p2: { x: number
 async function drawTreeChart(data: ChartData): Promise<FrameNode | null> {
   const items = parseTreeItems(data.data)
   if (!items.length) { figma.notify('No data'); return null }
-  await loadFonts()
+  await loadFonts(data)
   const theme = getTheme(data.theme)
   const barColor = normalizeColor(data.barColor, RED_NORTH)
 
