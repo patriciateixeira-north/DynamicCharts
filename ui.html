@@ -664,10 +664,8 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     // Timeline: a nested accordion — a phase has its own label/dates and a list of
     // subtasks, each with their own label/dates. The Phase-vs-Task distinction that used to
     // be a checkbox is now structural: an entry is a phase, or it's a subtask nested inside
-    // one — there's nothing to toggle. Still serialized to the same flat comma/pipe wire
-    // format every other chart type uses (reusing parseDataString/collectDataString's
-    // shape), just with an explicit 'phase'/'task' token in the 3rd slot instead of a
-    // boolean flag, and grouping tasks under whichever phase entry precedes them.
+    // one — there's nothing to toggle. Serialized flat, with an explicit 'phase'/'task' token
+    // instead of a boolean flag, grouping tasks under whichever phase entry precedes them.
     let timelinePhases = []
     function newTimelinePhase() {
       return { label: 'Phase ' + (timelinePhases.length + 1), start: '', end: '', tasks: [], collapsed: false }
@@ -802,11 +800,7 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     }
 
     // Serialized as tab-separated cells (label / start / end / type) per newline-separated
-    // row, in tree order (each phase immediately followed by its own subtasks) — NOT the
-    // shared comma/colon/pipe format the other chart types use, because a typed task label
-    // routinely contains a literal comma or colon ("Benchmark, análisis: competencia."),
-    // which would otherwise get misread as a row or field boundary (the exact bug this
-    // format already had to avoid for Table's free-text cells). Grouping on the way back in
+    // row, in tree order (each phase immediately followed by its own subtasks). Grouping on the way back in
     // (setTimelineDataFromString) is inferred the same way: a task row joins whichever phase
     // row came before it.
     function collectTimelineDataString() {
@@ -1490,27 +1484,36 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       }
     }
 
+    // Rows are sent to code.ts one per line, cells separated by tabs ("label\tv1\tv2"), so
+    // labels and values can contain commas ("Q1, 2026", "12,5"). Charts saved by older
+    // versions stored "label: v1 | v2, label: v1 | v2" — still read here when the string has
+    // no tab/newline, so selecting an old chart loads its data correctly.
     function parseDataString(str) {
+      str = String(str || '')
       const entries = []
-      for (const part of str.split(',')) {
-        const trimmed = part.trim()
-        if (!trimmed) continue
-        const colonIdx = trimmed.indexOf(':')
-        if (colonIdx > 0) {
-          const label = trimmed.slice(0, colonIdx).trim()
-          const valPart = trimmed.slice(colonIdx + 1).trim()
-          entries.push({ label: label, values: valPart.split('|').map(v => v.trim()) })
-        } else {
-          entries.push({ label: String(entries.length + 1), values: trimmed.split('|').map(v => v.trim()) })
+      if (!/[\t\n]/.test(str)) {
+        for (const part of str.split(',')) {
+          const trimmed = part.trim()
+          if (!trimmed) continue
+          const colonIdx = trimmed.indexOf(':')
+          if (colonIdx > 0) {
+            entries.push({ label: trimmed.slice(0, colonIdx).trim(), values: trimmed.slice(colonIdx + 1).split('|').map(v => v.trim()) })
+          } else {
+            entries.push({ label: String(entries.length + 1), values: trimmed.split('|').map(v => v.trim()) })
+          }
         }
+        return entries
+      }
+      for (const line of str.split('\n')) {
+        if (!line.trim()) continue
+        const cells = line.split('\t')
+        entries.push({ label: (cells[0] || '').trim(), values: cells.slice(1).map(v => v.trim()) })
       }
       return entries
     }
 
-    // Table cells hold free-text sentences that routinely contain literal commas, colons and
-    // periods (see the reference design), so the shared comma/colon/pipe wire format used by
-    // every other chart type is unsafe here — table data is serialized as tab-separated cells
-    // per newline-separated row instead, which nothing a user types is likely to collide with.
+    // Table/KPI/Tree cells are free text: same tab/newline format, but cells are kept
+    // untrimmed and empty cells are preserved.
     function collectTableDataString() {
       const rows = []
       for (const row of document.querySelectorAll('#data-blocks .data-block')) {
@@ -1555,21 +1558,20 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
     }
 
     function collectDataString() {
-      // Table/KPI/Tree go through the shared tab/newline-safe collector instead of the
-      // comma-based format below — needed since a title is short but commonly has an
-      // internal comma ("Investigación, diseño y testing"), which that comma-based format
-      // would misread as two rows.
+      // Every chart type uses the same tab/newline wire format; Table/KPI/Tree keep their own
+      // collector only because they keep empty cells and untrimmed free text.
       if (currentChartType === 'table' || currentChartType === 'kpi' || currentChartType === 'tree') return collectTableDataString()
       if (currentChartType === 'timeline') return collectTimelineDataString()
       if (currentChartType === 'index') return collectIndexDataString()
-      const parts = []
+      const rows = []
       for (const row of document.querySelectorAll('#data-blocks .data-block')) {
-        const label = row.querySelector('.block-label').value.trim()
-        const values = Array.from(row.querySelectorAll('.block-mvalue')).map(el => el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value.trim())
+        const clean = v => String(v).replace(/[\t\n]/g, ' ').trim()
+        const label = clean(row.querySelector('.block-label').value)
+        const values = Array.from(row.querySelectorAll('.block-mvalue')).map(el => el.type === 'checkbox' ? (el.checked ? '1' : '0') : clean(el.value))
         if (!values.some(v => !!v)) continue
-        parts.push(label ? label + ': ' + values.join(' | ') : values.join(' | '))
+        rows.push([label, ...values].join('\t'))
       }
-      return parts.join(', ')
+      return rows.join('\n')
     }
 
     function rebuildBlocksForMode() {
@@ -1603,7 +1605,13 @@ fig-footer { border-top:1px solid var(--border); background: #FFFFFF; padding:12
       return JSON.stringify([{ label: 'Q1', value: 120 }, { label: 'Q2', value: 90 }], null, 2)
     }
 
-    function toCellString(v) { return v === undefined || v === null ? '' : String(v) }
+    // JSON numbers are unambiguous (12.345 is twelve-point-something), but the same text typed
+    // in a cell would read as 12.345 thousand — so numbers come in with a decimal comma.
+    function toCellString(v) {
+      if (v === undefined || v === null) return ''
+      if (typeof v === 'number') return String(v).replace('.', ',')
+      return String(v)
+    }
 
     function importGenericJson(json) {
       if (!Array.isArray(json)) throw new Error('Expected a JSON array of { "label", "value" } objects.')

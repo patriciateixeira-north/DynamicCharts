@@ -13,9 +13,6 @@
     "slides",
     "buzz"
   ],
-  "relaunchButtons": [
-    { "command": "1671495039477864416", "name": "Dynamic Charts" }
-  ],
   "networkAccess": {
     "allowedDomains": [
       "none"

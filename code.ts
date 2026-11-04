@@ -1,7 +1,6 @@
 type ToolColor = { r: number; g: number; b: number; a: number }
 type ChartData = { chartType: string; data: string; barColor: ToolColor; overlapped?: boolean; theme?: 'light' | 'dark'; requestedWidth?: number; granularity?: 'week' | 'biweekly' | 'monthly'; vatIncluded?: boolean; vatShowTotal?: boolean; tableColumns?: string; displayFontFamily?: string; textFontFamily?: string; indexLastContentPage?: number }
 const TOOL_ID = "b7b8983d-a536-4eeb-b76e-89d2f24bca63"
-const DISPLAY_NAME = "Dynamic Charts"
 const CHART_DATA_KEY = 'chartData'
 const RED_NORTH: ToolColor = { r: 0.839, g: 0.082, b: 0.149, a: 1 }
 const DEFAULTS: ChartData = {
@@ -26,7 +25,6 @@ const MAX_CHART_WIDTH = 1920
 // tighter width range instead of the shared one above.
 const MIN_LINE_CHART_WIDTH = 500
 const MAX_LINE_CHART_WIDTH = 800
-let editingFrameId: string | null = null
 
 function clamp(v: number, min: number, max: number): number { return Math.max(min, Math.min(max, v)) }
 
@@ -50,13 +48,16 @@ function normalizeColor(value: unknown, fallback: ToolColor): ToolColor {
   return { r: n(obj.r, fallback.r), g: n(obj.g, fallback.g), b: n(obj.b, fallback.b), a: n(obj.a, fallback.a) }
 }
 
-function solidPaint(color: ToolColor): SolidPaint {
-  return { type: 'SOLID', color: { r: color.r, g: color.g, b: color.b }, opacity: color.a }
+// Resize constraints only exist on nodes that live inside a plain frame; anything else
+// (e.g. a child of an auto-layout frame, or a group) just keeps its default.
+function setConstraints(node: BaseNode, horizontal: ConstraintType, vertical: ConstraintType) {
+  if ('constraints' in node) {
+    try { node.constraints = { horizontal, vertical } } catch { /* not settable here */ }
+  }
 }
 
-function colorToHex(color: ToolColor): string {
-  const ch = (v: number) => Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0').toUpperCase()
-  return '#' + ch(color.r) + ch(color.g) + ch(color.b) + ch(color.a)
+function solidPaint(color: ToolColor): SolidPaint {
+  return { type: 'SOLID', color: { r: color.r, g: color.g, b: color.b }, opacity: color.a }
 }
 
 // Mixes a color toward a target color (amt 0..1, 1 = fully target). Used for "secondary
@@ -91,15 +92,15 @@ function lineChartColors(base: ToolColor, count: number, theme: Theme): ToolColo
 async function makeVectorPolygon(points: { x: number; y: number }[], fill: ToolColor, stroke?: ToolColor, strokeWeight = 2) {
   const vec = figma.createVector()
   const vertices = points.map(p => ({ x: p.x, y: p.y }))
-  const segments = [] as any[]
+  const segments: VectorSegment[] = []
   for (let i = 0; i < vertices.length; i++) segments.push({ start: i, end: (i + 1) % vertices.length })
-  const regions = [{ loops: [vertices.map((_, i) => i)], windingRule: 'NONZERO' }]
-  await vec.setVectorNetworkAsync({ vertices, segments, regions } as any)
+  const regions: VectorRegion[] = [{ loops: [vertices.map((_, i) => i)], windingRule: 'NONZERO' }]
+  await vec.setVectorNetworkAsync({ vertices, segments, regions })
   vec.fills = [solidPaint(fill)]
   if (stroke) {
     vec.strokes = [solidPaint(stroke)]
     vec.strokeWeight = strokeWeight
-    try { vec.strokeAlign = 'INSIDE' } catch { }
+    try { vec.strokeAlign = 'INSIDE' } catch { /* best effort */ }
   } else {
     // figma.createVector() defaults to a visible black stroke (a brand-new empty vector
     // network has no fill area of its own, so Figma gives it a stroke just to be visible at
@@ -113,71 +114,138 @@ async function makeVectorPolygon(points: { x: number; y: number }[], fill: ToolC
 async function makeVectorPolyline(points: { x: number; y: number }[], stroke: ToolColor, weight = 3) {
   const vec = figma.createVector()
   const vertices = points.map(p => ({ x: p.x, y: p.y }))
-  const segments = [] as any[]
+  const segments: VectorSegment[] = []
   for (let i = 0; i < vertices.length - 1; i++) segments.push({ start: i, end: i + 1 })
-  const regions: any[] = []
-  await vec.setVectorNetworkAsync({ vertices, segments, regions } as any)
+  await vec.setVectorNetworkAsync({ vertices, segments, regions: [] })
   vec.strokes = [solidPaint(stroke)]
   vec.strokeWeight = weight
-  try { vec.strokeJoin = 'ROUND'; vec.strokeCap = 'ROUND' } catch { }
+  try { vec.strokeJoin = 'ROUND'; vec.strokeCap = 'ROUND' } catch { /* best effort */ }
   vec.fills = []
   return vec
 }
 
-function htmlEscape(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
-}
-
 interface DataEntry { label: string; value: number }
-interface ProgressEntry { label: string; current: number; previous: number }
 
-function parseData(str: string): DataEntry[] {
+// ---- Data wire format ----
+// The UI sends one row per line and one cell per tab: "label\tvalue1\tvalue2…". Tabs and
+// newlines never appear inside a typed value, so labels and numbers are free to contain
+// commas ("Q1, 2026", "12,5"), colons ("10:00") or pipes.
+//
+// Charts saved by earlier versions of the plugin stored "label: v1 | v2, label: v1 | v2"
+// instead. That legacy format is still read (it's what's stored in their plugin data, so
+// it's what comes back when an old chart is selected and edited) — any string with no tab
+// and no newline is treated as legacy.
+function isLegacyFormat(str: string): boolean {
+  return !/[\t\n]/.test(str)
+}
+
+function splitRows(str: string): { label: string; cells: string[] }[] {
+  const out: { label: string; cells: string[] }[] = []
+  if (isLegacyFormat(str)) {
+    for (const part of str.split(',')) {
+      const trimmed = part.trim()
+      if (!trimmed) continue
+      const colonIdx = trimmed.indexOf(':')
+      const label = colonIdx > 0 ? trimmed.slice(0, colonIdx).trim() : ''
+      const valPart = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : trimmed
+      out.push({ label, cells: valPart.split('|').map(v => v.trim()) })
+    }
+    return out
+  }
+  for (const line of str.split('\n')) {
+    if (!line.trim()) continue
+    const [label, ...cells] = line.split('\t')
+    out.push({ label: (label || '').trim(), cells: cells.map(c => c.trim()) })
+  }
+  return out
+}
+
+// Reads a number the way people actually type it in Spain as well as in English:
+// "12,5" → 12.5 · "1.250" → 1250 · "1.250,75" → 1250.75 · "1,250.75" → 1250.75 ·
+// "-3,2" → -3.2 · "20%" → 20 · "1.200 €" → 1200. Returns NaN when there's no number.
+// Rules: with both separators, whichever comes last is the decimal one. A lone comma is
+// always decimal. A lone dot is a thousands separator only when it's followed by exactly
+// three digits and the integer part doesn't start with 0 ("1.500", "12.000"); otherwise
+// it's decimal ("1.5", "0.250").
+function parseNumber(raw: string): number {
+  let s = String(raw || '').replace(/[\s\u00a0%€$£]/g, '').replace(/\u2212/g, '-')
+  if (!s) return NaN
+  const lastComma = s.lastIndexOf(','), lastDot = s.lastIndexOf('.')
+  if (lastComma >= 0 && lastDot >= 0) {
+    const decimal = lastComma > lastDot ? ',' : '.'
+    const thousands = decimal === ',' ? '.' : ','
+    s = s.split(thousands).join('').replace(decimal, '.')
+  } else if (lastComma >= 0) {
+    s = (s.match(/,/g) || []).length > 1 ? s.split(',').join('') : s.replace(',', '.')
+  } else if (lastDot >= 0) {
+    const dots = (s.match(/\./g) || []).length
+    if (dots > 1 || /^[-+]?[1-9]\d{0,2}\.\d{3}$/.test(s)) s = s.split('.').join('')
+  }
+  return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(s) ? Number(s) : NaN
+}
+
+// Shown once per draw when a chart type that can't show negatives (pie, funnel, radar…)
+// receives some, so they don't just silently disappear.
+function warnNegatives(count: number, what: string) {
+  if (count > 0) figma.notify(`${count} negative value${count > 1 ? 's' : ''} ignored — ${what} only shows positive values`)
+}
+
+// One value per row. Empty / non-numeric rows are skipped. Negatives are kept only when the
+// chart can draw them (vertical/horizontal bars, budget); otherwise they're dropped with a
+// warning.
+function parseData(str: string, allowNegative = false, chartName = 'this chart'): DataEntry[] {
   const entries: DataEntry[] = []
-  for (const part of str.split(',')) {
-    const trimmed = part.trim()
-    if (!trimmed) continue
-    const colonIdx = trimmed.indexOf(':')
-    if (colonIdx > 0) {
-      const label = trimmed.slice(0, colonIdx).trim()
-      const valPart = trimmed.slice(colonIdx + 1).trim()
-      const num = Number(valPart.split('|')[0].trim())
-      if (!isNaN(num) && num >= 0) entries.push({ label, value: num })
-    } else {
-      const num = Number(trimmed)
-      if (!isNaN(num) && num >= 0) entries.push({ label: String(entries.length + 1), value: num })
-    }
+  let negatives = 0
+  for (const row of splitRows(str)) {
+    const num = parseNumber(row.cells[0] || '')
+    if (isNaN(num)) continue
+    if (num < 0 && !allowNegative) { negatives++; continue }
+    entries.push({ label: row.label || String(entries.length + 1), value: num })
   }
+  warnNegatives(negatives, chartName)
   return entries
 }
 
-function parseProgressData(str: string): ProgressEntry[] {
-  const entries: ProgressEntry[] = []
-  for (const part of str.split(',')) {
-    const trimmed = part.trim()
-    if (!trimmed) continue
-    const colonIdx = trimmed.indexOf(':')
-    if (colonIdx > 0) {
-      const label = trimmed.slice(0, colonIdx).trim()
-      const valPart = trimmed.slice(colonIdx + 1).trim()
-      const vals = valPart.split('|').map(v => Number(v.trim()))
-      const cur = !isNaN(vals[0]) && vals[0] >= 0 ? vals[0] : 0
-      const prev = vals.length > 1 && !isNaN(vals[1]) && vals[1] >= 0 ? vals[1] : 0
-      entries.push({ label, current: cur, previous: prev })
-    }
+// "label → v1, v2, v3…" with an arbitrary number of series per row (line, grouped/stacked,
+// progress). Every row is padded with 0 to the longest row's series count so all series
+// draw with the same number of points. Empty cells count as 0.
+function parseMultiSeries(str: string, allowNegative = false, chartName = 'this chart'): { label: string; values: number[] }[] {
+  const out: { label: string; values: number[] }[] = []
+  let negatives = 0
+  for (const row of splitRows(str)) {
+    const values = row.cells.map(c => {
+      const n = parseNumber(c)
+      if (isNaN(n)) return 0
+      if (n < 0 && !allowNegative) { negatives++; return 0 }
+      return n
+    })
+    out.push({ label: row.label || String(out.length + 1), values })
   }
-  return entries
+  const maxLen = Math.max(1, ...out.map(r => r.values.length))
+  for (const r of out) while (r.values.length < maxLen) r.values.push(0)
+  warnNegatives(negatives, chartName)
+  return out
 }
 
+// Formats a plain number Spanish-style: "," decimal, "." thousands, at most `maxDecimals`
+// decimals with trailing zeros dropped ("12,5", "1.250", "-3,25").
+function formatNumber(n: number, maxDecimals = 2): string {
+  const neg = n < 0
+  const fixed = Math.abs(n).toFixed(maxDecimals)
+  let [intPart, decPart = ''] = fixed.split('.')
+  decPart = decPart.replace(/0+$/, '')
+  intPart = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+  const out = decPart ? intPart + ',' + decPart : intPart
+  return (neg && out !== '0' ? '-' : '') + out
+}
+
+// Short form for value callouts and axis ticks: K/M suffix for thousands/millions
+// ("597K", "3,6M", "-1,2K"), plain number below that.
 function formatValue(n: number): { numPart: string; suffix: string } {
-  if (n >= 1000000) {
-    const v = n / 1000000
-    return { numPart: v % 1 === 0 ? String(v) : v.toFixed(1), suffix: 'M' }
-  }
-  if (n >= 1000) {
-    const v = n / 1000
-    return { numPart: v % 1 === 0 ? String(v) : v.toFixed(1), suffix: 'K' }
-  }
-  return { numPart: String(n), suffix: '' }
+  const abs = Math.abs(n)
+  if (abs >= 1000000) return { numPart: formatNumber(n / 1000000, 1), suffix: 'M' }
+  if (abs >= 1000) return { numPart: formatNumber(n / 1000, 1), suffix: 'K' }
+  return { numPart: formatNumber(n), suffix: '' }
 }
 
 function formatAxisValue(n: number): string {
@@ -185,9 +253,12 @@ function formatAxisValue(n: number): string {
   return numPart + suffix
 }
 
-function niceScale(maxVal: number, targetTicks: number): { max: number; ticks: number[] } {
-  if (maxVal <= 0) return { max: 1, ticks: [0, 1] }
-  const rough = maxVal / targetTicks
+// "Nice" axis range covering [min(0, minVal), max(0, maxVal)] with round tick steps
+// (1/2/5 × 10^n). Zero is always one of the ticks, so bars always grow from a gridline.
+function niceRange(minVal: number, maxVal: number, targetTicks: number): { min: number; max: number; ticks: number[] } {
+  const lo = Math.min(0, minVal), hi = Math.max(0, maxVal)
+  if (!(hi - lo > 0)) return { min: 0, max: 1, ticks: [0, 1] }
+  const rough = (hi - lo) / targetTicks
   const mag = Math.pow(10, Math.floor(Math.log10(rough)))
   const residual = rough / mag
   let niceStep: number
@@ -195,12 +266,21 @@ function niceScale(maxVal: number, targetTicks: number): { max: number; ticks: n
   else if (residual <= 3) niceStep = 2 * mag
   else if (residual <= 7) niceStep = 5 * mag
   else niceStep = 10 * mag
-  const niceMax = Math.ceil(maxVal / niceStep) * niceStep
+  const niceMin = Math.floor(lo / niceStep) * niceStep
+  const niceMax = Math.ceil(hi / niceStep) * niceStep
   const ticks: number[] = []
-  for (let v = 0; v <= niceMax; v += niceStep) ticks.push(Math.round(v * 1e6) / 1e6)
-  return { max: niceMax, ticks }
+  const steps = Math.round((niceMax - niceMin) / niceStep)
+  for (let i = 0; i <= steps; i++) ticks.push(Math.round((niceMin + i * niceStep) * 1e6) / 1e6)
+  return { min: niceMin, max: niceMax, ticks }
 }
 
+// Solid zero baseline for charts whose axis range goes below zero — the bottom/left axis
+// line stays at the range's edge, this marks where bars actually start from.
+async function addZeroLine(frame: FrameNode, theme: Theme, from: { x: number; y: number }, to: { x: number; y: number }) {
+  const zero = await makeVectorPolyline([from, to], theme.muted, 1)
+  zero.name = 'zero-line'
+  frame.appendChild(zero)
+}
 
 // Solid x/y axis boundary lines for a cartesian plot area, drawn on top of (and distinct
 // from) the dashed tick gridlines — (x0,y0) is the plot area's top-left corner.
@@ -235,7 +315,7 @@ function wrapInAnchor(frame: FrameNode, node: SceneNode & { x: number; y: number
   anchor.clipsContent = false
   node.x = 0
   node.y = 0
-  try { (node as any).constraints = { horizontal: 'MIN', vertical: 'MIN' } } catch { }
+  setConstraints(node, 'MIN', 'MIN')
   anchor.appendChild(node)
   frame.insertChild(index, anchor)
   return anchor
@@ -295,7 +375,7 @@ function makeChartAdaptive(
 
   children.forEach(child => {
     if (child.name === 'legend') {
-      try { (child as any).constraints = { horizontal: 'MIN', vertical: 'MAX' } } catch { }
+      setConstraints(child, 'MIN', 'MAX')
       return
     }
     if (child.name === 'category-label' && categoryZone) {
@@ -303,7 +383,7 @@ function makeChartAdaptive(
       c.x -= paddingLeft
       c.y -= (frameHeight - categoryZoneHeight!)
       const target = c.type === 'TEXT' ? wrapInAnchor(categoryZone, c, categoryZone.children.length) : (categoryZone.appendChild(c), c)
-      try { (target as any).constraints = { horizontal: 'SCALE', vertical: 'MIN' } } catch { }
+      setConstraints(target, 'SCALE', 'MIN')
       return
     }
     const c = child as SceneNode & { x: number; y: number }
@@ -311,23 +391,23 @@ function makeChartAdaptive(
     c.y -= paddingTop
     if (child.name === 'y-axis-line') {
       scaleArea.appendChild(c)
-      try { (c as any).constraints = { horizontal: 'MIN', vertical: 'STRETCH' } } catch { }
+      setConstraints(c, 'MIN', 'STRETCH')
       return
     }
     if (child.name === 'y-axis-label') {
       const target = wrapInAnchor(scaleArea, c, scaleArea.children.length)
-      try { (target as any).constraints = { horizontal: 'MIN', vertical: 'SCALE' } } catch { }
+      setConstraints(target, 'MIN', 'SCALE')
       return
     }
     const target = c.type === 'TEXT' ? wrapInAnchor(scaleArea, c, scaleArea.children.length) : (scaleArea.appendChild(c), c)
-    try { (target as any).constraints = { horizontal: 'SCALE', vertical: 'SCALE' } } catch { }
+    setConstraints(target, 'SCALE', 'SCALE')
   })
 
   frame.insertChild(0, scaleArea)
-  try { (scaleArea as any).constraints = { horizontal: 'STRETCH', vertical: 'STRETCH' } } catch { }
+  setConstraints(scaleArea, 'STRETCH', 'STRETCH')
   if (categoryZone) {
     frame.insertChild(0, categoryZone)
-    try { (categoryZone as any).constraints = { horizontal: 'STRETCH', vertical: 'MAX' } } catch { }
+    setConstraints(categoryZone, 'STRETCH', 'MAX')
   }
 }
 
@@ -361,13 +441,13 @@ function makeUniformScaleAdaptive(frame: FrameNode, size: number, frameHeight: n
     // instead of freezing its size the way the CENTER-constraint anchor trick elsewhere in
     // this file does.
     if (child.type === 'ELLIPSE' && Math.abs(child.width - child.height) < 0.5) {
-      try { child.lockAspectRatio() } catch { }
+      try { child.lockAspectRatio() } catch { /* best effort */ }
     }
-    try { (target as any).constraints = { horizontal: 'SCALE', vertical: 'SCALE' } } catch { }
+    setConstraints(target, 'SCALE', 'SCALE')
   })
 
   frame.insertChild(0, plotArea)
-  try { (plotArea as any).constraints = { horizontal: 'STRETCH', vertical: 'STRETCH' } } catch { }
+  setConstraints(plotArea, 'STRETCH', 'STRETCH')
 }
 
 // Timeline only: dates spread out with width (SCALE) live, with no redraw/refresh needed —
@@ -401,13 +481,13 @@ function makeTimelineAdaptive(frame: FrameNode, paddingLeft: number, paddingRigh
     // — stays pinned near the top, since header content is fixed-position, not something
     // that should drift downward as row content grows below it.
     const vertical = target.name === 'row-entry' ? 'SCALE' : target.name === 'grid-line' ? 'STRETCH' : 'MIN'
-    try { (target as any).constraints = { horizontal: 'SCALE', vertical } } catch { }
+    setConstraints(target, 'SCALE', vertical)
   })
 
   frame.insertChild(0, plotArea)
   // STRETCH (not MIN) so plot-area's own height actually tracks the frame's height —
   // otherwise row-entries' vertical SCALE constraint would have nothing to scale into.
-  try { (plotArea as any).constraints = { horizontal: 'STRETCH', vertical: 'STRETCH' } } catch { }
+  setConstraints(plotArea, 'STRETCH', 'STRETCH')
 }
 
 // Wraps a row's already-positioned cells (their x/y are relative to the row's own top-left,
@@ -429,7 +509,7 @@ function wrapRowInAnchor(parent: FrameNode, cells: SceneNode[], aligns: ('MIN' |
   wrapper.clipsContent = false
   cells.forEach((c, i) => {
     wrapper.appendChild(c)
-    try { (c as any).constraints = { horizontal: aligns[i], vertical: 'MIN' } } catch { }
+    setConstraints(c, aligns[i], 'MIN')
   })
   parent.appendChild(wrapper)
   return wrapper
@@ -449,15 +529,15 @@ function wrapRowInAnchor(parent: FrameNode, cells: SceneNode[], aligns: ('MIN' |
 // distorting wrapped multi-line text) but still SCALEs vertically to keep spanning the box's
 // full, growing height.
 function makeBoxListAdaptive(frame: FrameNode, box: FrameNode) {
-  try { (box as any).constraints = { horizontal: 'STRETCH', vertical: 'STRETCH' } } catch { }
+  setConstraints(box, 'STRETCH', 'STRETCH')
   for (const child of [...box.children]) {
     if (child.name === 'row-divider') {
-      try { (child as any).constraints = { horizontal: 'STRETCH', vertical: 'SCALE' } } catch { }
+      setConstraints(child, 'STRETCH', 'SCALE')
     } else if (child.name === 'col-divider') {
-      try { (child as any).constraints = { horizontal: 'MIN', vertical: 'SCALE' } } catch { }
+      setConstraints(child, 'MIN', 'SCALE')
     } else {
       // 'row-anchor' wrappers, or any other direct box child.
-      try { (child as any).constraints = { horizontal: 'STRETCH', vertical: 'SCALE' } } catch { }
+      setConstraints(child, 'STRETCH', 'SCALE')
     }
   }
   // Content outside the box (Budget's TOTAL row + footnote) needs to track the box's
@@ -467,7 +547,7 @@ function makeBoxListAdaptive(frame: FrameNode, box: FrameNode) {
   for (const child of [...frame.children]) {
     if (child === box) continue
     const horizontal = child.name === 'cell-right' ? 'MAX' : 'MIN'
-    try { (child as any).constraints = { horizontal, vertical: 'MAX' } } catch { }
+    setConstraints(child, horizontal, 'MAX')
   }
 }
 
@@ -489,7 +569,7 @@ function createAnchoredDot(x: number, y: number, size: number, color: ToolColor)
   dot.x = pad
   dot.y = pad
   dot.fills = [ solidPaint(color) ]
-  try { (dot as any).constraints = { horizontal: 'CENTER', vertical: 'CENTER' } } catch { }
+  setConstraints(dot, 'CENTER', 'CENTER')
   anchor.appendChild(dot)
   return anchor
 }
@@ -653,7 +733,7 @@ async function createValueLabel(n: number, size: number, color: ToolColor, font:
   t.fontSize = size
   t.fills = [ solidPaint(color) ]
   if (suffix) {
-    try { t.setRangeFontSize(numPart.length, text.length, suffixSize ?? Math.max(8, Math.round(size * 0.7))) } catch { }
+    try { t.setRangeFontSize(numPart.length, text.length, suffixSize ?? Math.max(8, Math.round(size * 0.7))) } catch { /* best effort */ }
   }
   return t
 }
@@ -664,7 +744,7 @@ function createRect(w: number, h: number, fill: Paint, radius: number = 0) {
   r.fills = [ fill ]
   r.strokeWeight = 0
   if (radius > 0) {
-    try { r.cornerRadius = Math.min(radius, Math.min(w, h) / 2) } catch { }
+    try { r.cornerRadius = Math.min(radius, Math.min(w, h) / 2) } catch { /* best effort */ }
   }
   return r
 }
@@ -674,7 +754,7 @@ function createRect(w: number, h: number, fill: Paint, radius: number = 0) {
 // outsideColor) so it stays legible at low/zero values.
 async function placeProgressValueLabel(frame: FrameNode, value: number, fillW: number, x0: number, rowY: number, rowH: number, insideColor: ToolColor, outsideColor: ToolColor): Promise<TextNode> {
   const fontSize = 28
-  const txt = await createTextNode(String(value), MODERAT_MEDIUM, fontSize, insideColor)
+  const txt = await createTextNode(formatNumber(value), MODERAT_MEDIUM, fontSize, insideColor)
   const fits = fillW > (txt.width || 0) + 64
   if (fits) {
     txt.x = x0 + fillW - (txt.width || 0) - 38
@@ -688,7 +768,7 @@ async function placeProgressValueLabel(frame: FrameNode, value: number, fillW: n
 }
 
 async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, true)
   if (!entries.length) {
     figma.notify('No data entries to draw')
     return null
@@ -730,10 +810,11 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
   frame.clipsContent = false
   frame.layoutMode = 'NONE'
 
-  const maxVal = Math.max(...entries.map(e => e.value))
+  const values = entries.map(e => e.value)
   const scaleArea = frameHeight - paddingTop - paddingBottom
-  const nice = niceScale(maxVal, 8)
-  const scale = nice.max > 0 ? scaleArea / nice.max : 1
+  const nice = niceRange(Math.min(...values), Math.max(...values), 8)
+  const scale = scaleArea / (nice.max - nice.min)
+  const zeroY = paddingTop + nice.max * scale
 
   // Dashed gridlines + left-hand axis labels
   for (let i = 0; i < nice.ticks.length; i++) {
@@ -745,7 +826,7 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
     tick.y = Math.round(y)
     tick.strokes = [ solidPaint(theme.grid) ]
     tick.strokeWeight = 1
-    try { (tick as any).dashPattern = GRID_DASH } catch { }
+    tick.dashPattern = GRID_DASH
     frame.appendChild(tick)
 
     const axisLbl = await createTextNode(formatAxisValue(v), MODERAT_REGULAR, TICK_FONT_SIZE, theme.text)
@@ -759,14 +840,16 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(axisLbl)
   }
   await addCartesianAxes(frame, theme, paddingLeft, paddingTop, frameWidth - paddingLeft - paddingRight, scaleArea)
+  if (nice.min < 0) await addZeroLine(frame, theme, { x: paddingLeft, y: Math.round(zeroY) }, { x: frameWidth - paddingRight, y: Math.round(zeroY) })
 
   const barColor = normalizeColor(data.barColor, RED_NORTH)
   const startX = paddingLeft + Math.max(0, (availWidth - contentWidth) / 2)
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i]
-    const h = Math.max(2, Math.round(e.value * scale))
+    const h = Math.max(2, Math.round(Math.abs(e.value) * scale))
     const x = startX + i * (colWidth + colGap)
-    const y = paddingTop + (scaleArea - h)
+    // Positive bars grow up from the zero line, negative ones hang down from it.
+    const y = e.value >= 0 ? Math.round(zeroY) - h : Math.round(zeroY)
 
     const bar = createRect(colWidth, h, solidPaint(barColor))
     bar.x = x
@@ -775,7 +858,9 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
 
     const valTxt = await createValueLabel(e.value, VALUE_FONT_SIZE, theme.text)
     valTxt.x = x + Math.round((colWidth - (valTxt.width || 0)) / 2)
-    valTxt.y = Math.max(0, y - 64)
+    // Negative bars put their number on the empty side of the zero line, so it never
+    // collides with the category labels under the plot.
+    valTxt.y = e.value >= 0 ? Math.max(0, y - 64) : Math.round(zeroY) - 64
     frame.appendChild(valTxt)
 
     const lbl = await createTextNode(e.label, MODERAT_REGULAR, TICK_LABEL_FONT_SIZE, theme.text)
@@ -786,7 +871,7 @@ async function drawVerticalChart(data: ChartData): Promise<FrameNode | null> {
   }
 
   makeChartAdaptive(frame, paddingLeft, paddingRight, paddingTop, paddingBottom, frameWidth, frameHeight, paddingBottom)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   await figma.clientStorage.setAsync(CHART_DATA_KEY, data)
   placeNewChartFrame(frame)
   figma.notify('Chart created')
@@ -803,7 +888,7 @@ function placeFrameAtViewport(frame: FrameNode) {
     y = Math.max(bounds.y, Math.min(y, bounds.y + Math.max(0, bounds.height - frame.height)))
     frame.x = Math.round(x)
     frame.y = Math.round(y)
-  } catch (e) {
+  } catch {
     // ignore if viewport not available
   }
 }
@@ -826,7 +911,7 @@ function resolvePlacementContainer(): DeckPageNode | null {
     try {
       const focused = figma.currentPage.focusedSlide
       if (focused && !focused.getPluginData(TOOL_ID)) return focused
-    } catch { }
+    } catch { /* best effort */ }
   }
   return null
 }
@@ -844,7 +929,7 @@ function placeNewChartFrame(frame: FrameNode) {
     // crushing charts down to a sliver width, mangling their text, on any slide/frame
     // that happens to use auto-layout). 'ABSOLUTE' opts back out of that flow so the chart
     // keeps the exact size it was drawn at and manual x/y centering actually sticks.
-    try { if (container.layoutMode !== 'NONE') frame.layoutPositioning = 'ABSOLUTE' } catch { }
+    try { if (container.layoutMode !== 'NONE') frame.layoutPositioning = 'ABSOLUTE' } catch { /* best effort */ }
     // Dead center is deterministic — a container that already holds one or more of this
     // plugin's own charts would otherwise get every new one stacked exactly on top of the
     // last (identical text/axes overlapping into an unreadable mess), so each existing
@@ -890,6 +975,52 @@ notifySelection()
 // resolvePlacementContainer/placeNewChartFrame to recognize whatever the user currently has
 // selected/focused as a valid drop target for a freshly created chart.
 type DeckPageNode = FrameNode | SlideNode
+
+const CHART_DRAWERS: Record<string, (data: ChartData) => Promise<FrameNode | null>> = {
+  vertical: drawVerticalChart,
+  horizontal: drawHorizontalChart,
+  line: drawMultiLineChart,
+  multiline: drawMultiLineChart, // charts saved by older versions
+  grouped: drawGroupedChart,
+  radar: drawRadarChart,
+  pie: drawPieChart,
+  donut: drawDonutChart,
+  progress: drawProgressChart,
+  timeline: drawTimelineChart,
+  budget: drawBudgetChart,
+  table: drawTableChart,
+  index: drawIndexChart,
+  kpi: drawKpiChart,
+  funnel: drawFunnelChart,
+  network: drawForceGraphChart,
+  petals: drawPetalRoseChart,
+  tree: drawTreeChart,
+}
+
+// Draws any chart type. Never throws: a missing font or any other failure surfaces as a
+// toast instead of the plugin silently doing nothing.
+async function drawChart(params: ChartData): Promise<FrameNode | null> {
+  const draw = CHART_DRAWERS[params.chartType]
+  if (!draw) { figma.notify(`Unknown chart type "${params.chartType}"`); return null }
+  // Anything a failed draw already put on the page is removed again, so a failure never
+  // leaves a half-built chart behind.
+  const before = new Set(figma.currentPage.children.map(c => c.id))
+  try {
+    return await draw(params)
+  } catch (err) {
+    for (const child of [...figma.currentPage.children]) {
+      if (!before.has(child.id)) { try { child.remove() } catch { /* best effort */ } }
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    if (/font/i.test(message)) {
+      figma.notify(`Couldn't load the chart fonts (${DEFAULT_DISPLAY_FONT_FAMILY} / ${DEFAULT_TEXT_FONT_FAMILY}). Install them, or pick other fonts from the 🎨 Aesthetic menu.`, { error: true, timeout: 8000 })
+    } else {
+      figma.notify(`Couldn't draw the chart: ${message}`, { error: true, timeout: 8000 })
+    }
+    console.error('[Dynamic Charts]', err)
+    return null
+  }
+}
 
 figma.ui.onmessage = async (msg) => {
   if (msg.type === 'request-selection') {
@@ -962,35 +1093,18 @@ figma.ui.onmessage = async (msg) => {
       // replace it — and since the new frame is positioned at the old one's exact x/y before
       // the old one is removed, the chart never visibly moves or disappears mid-edit, no
       // matter what changed (chart type, color, data, anything).
-      let newFrame: FrameNode | null = null
-      if (params.chartType === 'vertical') newFrame = await drawVerticalChart(params)
-      else if (params.chartType === 'horizontal') newFrame = await drawHorizontalChart(params)
-      else if (params.chartType === 'line' || params.chartType === 'multiline') newFrame = await drawMultiLineChart(params)
-      else if (params.chartType === 'grouped') newFrame = await drawGroupedChart(params)
-      else if (params.chartType === 'radar') newFrame = await drawRadarChart(params)
-      else if (params.chartType === 'pie') newFrame = await drawPieChart(params)
-      else if (params.chartType === 'donut') newFrame = await drawDonutChart(params)
-      else if (params.chartType === 'progress') newFrame = await drawProgressChart(params)
-      else if (params.chartType === 'timeline') newFrame = await drawTimelineChart(params)
-      else if (params.chartType === 'budget') newFrame = await drawBudgetChart(params)
-      else if (params.chartType === 'table') newFrame = await drawTableChart(params)
-      else if (params.chartType === 'index') newFrame = await drawIndexChart(params)
-      else if (params.chartType === 'kpi') newFrame = await drawKpiChart(params)
-      else if (params.chartType === 'funnel') newFrame = await drawFunnelChart(params)
-      else if (params.chartType === 'network') newFrame = await drawForceGraphChart(params)
-      else if (params.chartType === 'petals') newFrame = await drawPetalRoseChart(params)
-      else if (params.chartType === 'tree') newFrame = await drawTreeChart(params)
+      const newFrame = await drawChart(params)
       if (newFrame) {
         // Move it back into the old frame's actual parent (Section/Group/Frame/page) at the
         // same child index before applying x/y, so those coordinates land in the right space
         // and the stacking order relative to sibling layers is preserved too.
         if (oldParent) {
           try { oldParent.insertChild(Math.max(0, oldIndex), newFrame) }
-          catch { try { oldParent.appendChild(newFrame) } catch { } }
+          catch { try { oldParent.appendChild(newFrame) } catch { /* best effort */ } }
         }
         // keep the chart exactly where the old one was, regardless of what changed
-        try { newFrame.x = oldX; newFrame.y = oldY } catch { }
-        try { node.remove() } catch { }
+        try { newFrame.x = oldX; newFrame.y = oldY } catch { /* best effort */ }
+        try { node.remove() } catch { /* best effort */ }
         figma.currentPage.selection = [newFrame]
         figma.notify('Chart updated')
       } else {
@@ -1002,24 +1116,7 @@ figma.ui.onmessage = async (msg) => {
     }
 
     // normal create
-    if (params.chartType === 'vertical') await drawVerticalChart(params)
-    else if (params.chartType === 'horizontal') await drawHorizontalChart(params)
-    else if (params.chartType === 'line' || params.chartType === 'multiline') await drawMultiLineChart(params)
-    else if (params.chartType === 'grouped') await drawGroupedChart(params)
-    else if (params.chartType === 'radar') await drawRadarChart(params)
-    else if (params.chartType === 'pie') await drawPieChart(params)
-    else if (params.chartType === 'donut') await drawDonutChart(params)
-    else if (params.chartType === 'progress') await drawProgressChart(params)
-    else if (params.chartType === 'timeline') await drawTimelineChart(params)
-    else if (params.chartType === 'budget') await drawBudgetChart(params)
-    else if (params.chartType === 'table') await drawTableChart(params)
-    else if (params.chartType === 'index') await drawIndexChart(params)
-    else if (params.chartType === 'kpi') await drawKpiChart(params)
-    else if (params.chartType === 'funnel') await drawFunnelChart(params)
-    else if (params.chartType === 'network') await drawForceGraphChart(params)
-    else if (params.chartType === 'petals') await drawPetalRoseChart(params)
-    else if (params.chartType === 'tree') await drawTreeChart(params)
-    else figma.notify('Only vertical and horizontal charts are implemented in this build')
+    await drawChart(params)
     figma.ui.postMessage({ type: 'run-complete', chartType: params.chartType, wasEditing: false })
   } else if (msg.type === 'resize' && typeof msg.height === 'number') {
     const width = typeof msg.width === 'number' ? Math.max(320, Math.min(900, Math.round(msg.width))) : 420
@@ -1029,37 +1126,12 @@ figma.ui.onmessage = async (msg) => {
   }
 }
 
-// Parses "label: v1|v2|v3|..." into an arbitrary number of series per row (used by
-// multiline, grouped, and progress). Every row is padded to the longest row's series
-// count so all series draw with the same number of points.
-function parseMultiSeries(str: string): { label: string; values: number[] }[] {
-  const out: { label: string; values: number[] }[] = []
-  for (const part of str.split(',')) {
-    const trimmed = part.trim()
-    if (!trimmed) continue
-    const colonIdx = trimmed.indexOf(':')
-    const toValues = (valPart: string) => valPart.split('|').map(v => {
-      const n = Number(v.trim())
-      return !isNaN(n) && n >= 0 ? n : 0
-    })
-    if (colonIdx > 0) {
-      const label = trimmed.slice(0, colonIdx).trim()
-      out.push({ label, values: toValues(trimmed.slice(colonIdx + 1).trim()) })
-    } else {
-      out.push({ label: String(out.length + 1), values: toValues(trimmed) })
-    }
-  }
-  const maxLen = Math.max(1, ...out.map(r => r.values.length))
-  for (const r of out) while (r.values.length < maxLen) r.values.push(0)
-  return out
-}
-
 // Line and multi-line are unified: this draws 1+ lines the same way, so a plain "line"
 // chart is just this with a single row.
 async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
   // Each row is one whole line: its label is the line's name (legend), and its values are
   // the sequential points along the shared x-axis.
-  const lines = parseMultiSeries(data.data)
+  const lines = parseMultiSeries(data.data, true)
   if (!lines.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1082,10 +1154,10 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
   frame.clipsContent = false
   frame.name = 'Chart'
 
-  const maxVal = Math.max(...lines.map(l => Math.max(...l.values)))
+  const allValues = lines.flatMap(l => l.values)
   const areaW = w - paddingLeft - paddingRight, areaH = h - paddingTop - paddingBottom
-  const nice = niceScale(maxVal, 8)
-  const scale = nice.max > 0 ? areaH / nice.max : 1
+  const nice = niceRange(Math.min(...allValues), Math.max(...allValues), 8)
+  const scale = areaH / (nice.max - nice.min)
 
   for (let i = 0; i < nice.ticks.length; i++) {
     const v = nice.ticks[i]
@@ -1097,7 +1169,7 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
     line.y = Math.round(y)
     line.strokes = [ solidPaint(theme.grid) ]
     line.strokeWeight = 1
-    try { (line as any).dashPattern = GRID_DASH } catch { }
+    line.dashPattern = GRID_DASH
     frame.appendChild(line)
     const lbl = await createTextNode(formatAxisValue(v), MODERAT_REGULAR, TICK_FONT_SIZE, theme.text)
     lbl.name = 'y-axis-label'
@@ -1107,6 +1179,10 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(lbl)
   }
   await addCartesianAxes(frame, theme, paddingLeft, paddingTop, areaW, areaH)
+  if (nice.min < 0) {
+    const zeroY = Math.round(paddingTop + nice.max * scale)
+    await addZeroLine(frame, theme, { x: paddingLeft, y: zeroY }, { x: paddingLeft + areaW, y: zeroY })
+  }
 
   const barColor = normalizeColor(data.barColor, RED_NORTH)
   const lineColors = lineChartColors(barColor, lineCount, theme)
@@ -1185,14 +1261,14 @@ async function drawMultiLineChart(data: ChartData): Promise<FrameNode | null> {
   frame.appendChild(legendRow)
 
   makeChartAdaptive(frame, paddingLeft, paddingRight, paddingTop, paddingBottom, w, h)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Line chart created')
   return frame
 }
 
 async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
-  const rows = parseMultiSeries(data.data)
+  const rows = parseMultiSeries(data.data, true)
   if (!rows.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1235,11 +1311,15 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
 
   const scaleAreaTop = paddingTop, scaleAreaBottom = frameHeight - paddingBottom
   const scaleArea = scaleAreaBottom - scaleAreaTop
-  const maxVal = overlapped
-    ? Math.max(...rows.map(r => r.values.reduce((a, b) => a + b, 0)))
-    : Math.max(...rows.map(r => Math.max(...r.values)))
-  const nice = niceScale(maxVal, 8)
-  const scale = nice.max > 0 ? scaleArea / nice.max : 1
+  // Stacked: positives stack up from zero and negatives stack down from it, so the range
+  // is the biggest positive pile vs. the biggest negative pile.
+  const posSum = (r: { values: number[] }) => r.values.reduce((a, b) => a + Math.max(0, b), 0)
+  const negSum = (r: { values: number[] }) => r.values.reduce((a, b) => a + Math.min(0, b), 0)
+  const maxVal = overlapped ? Math.max(...rows.map(posSum)) : Math.max(...rows.map(r => Math.max(...r.values)))
+  const minVal = overlapped ? Math.min(...rows.map(negSum)) : Math.min(...rows.map(r => Math.min(...r.values)))
+  const nice = niceRange(minVal, maxVal, 8)
+  const scale = scaleArea / (nice.max - nice.min)
+  const zeroY = Math.round(scaleAreaTop + nice.max * scale)
 
   for (let i = 0; i < nice.ticks.length; i++) {
     const v = nice.ticks[i]
@@ -1250,7 +1330,7 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
     line.y = Math.round(y)
     line.strokes = [ solidPaint(theme.grid) ]
     line.strokeWeight = 1
-    try { (line as any).dashPattern = GRID_DASH } catch { }
+    line.dashPattern = GRID_DASH
     frame.appendChild(line)
     const lbl = await createTextNode(formatAxisValue(v), MODERAT_REGULAR, TICK_FONT_SIZE, theme.text)
     lbl.name = 'y-axis-label'
@@ -1260,6 +1340,7 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(lbl)
   }
   await addCartesianAxes(frame, theme, paddingLeft, scaleAreaTop, frameWidth - paddingLeft - paddingRight, scaleArea)
+  if (nice.min < 0) await addZeroLine(frame, theme, { x: paddingLeft, y: zeroY }, { x: frameWidth - paddingRight, y: zeroY })
 
   const barColor = normalizeColor(data.barColor, RED_NORTH)
   const seriesColors = seriesColorsLight(barColor, seriesCount, theme.bg)
@@ -1269,27 +1350,31 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
     const gx = startX + i * (groupWidth + groupGap)
     if (overlapped) {
       // Stack back-to-front (series N-1 at the bottom) so series 0 ends up on top.
-      let cumH = 0
+      let upH = 0, downH = 0
       for (let s = seriesCount - 1; s >= 0; s--) {
-        const hS = Math.max(0, Math.round(r.values[s] * scale))
+        const v = r.values[s]
+        const hS = Math.round(Math.abs(v) * scale)
+        if (hS <= 0) continue
         const seg = createRect(barWidth, hS, solidPaint(seriesColors[s]))
-        seg.x = gx; seg.y = scaleAreaBottom - cumH - hS
+        seg.x = gx
+        if (v >= 0) { seg.y = zeroY - upH - hS; upH += hS }
+        else { seg.y = zeroY + downH; downH += hS }
         frame.appendChild(seg)
-        cumH += hS
       }
 
-      // Total value above the stack, same convention as a plain (non-overlapped) bar chart.
+      // Net total above the stack, same convention as a plain bar chart.
       const total = r.values.reduce((a, b) => a + b, 0)
       const valTxt = await createValueLabel(total, VALUE_FONT_SIZE, theme.text)
       valTxt.x = gx + Math.round((barWidth - (valTxt.width || 0)) / 2)
-      valTxt.y = Math.max(0, scaleAreaBottom - cumH - 64)
+      valTxt.y = Math.max(0, zeroY - upH - 64)
       frame.appendChild(valTxt)
     } else {
       for (let s = 0; s < seriesCount; s++) {
-        const hS = Math.max(2, Math.round(r.values[s] * scale))
+        const v = r.values[s]
+        const hS = Math.max(2, Math.round(Math.abs(v) * scale))
         const seg = createRect(barWidth, hS, solidPaint(seriesColors[s]))
         seg.x = gx + s * (barWidth + pairGap)
-        seg.y = scaleAreaBottom - hS
+        seg.y = v >= 0 ? zeroY - hS : zeroY
         frame.appendChild(seg)
       }
     }
@@ -1308,14 +1393,14 @@ async function drawGroupedChart(data: ChartData): Promise<FrameNode | null> {
   frame.appendChild(legendRow)
 
   makeChartAdaptive(frame, paddingLeft, paddingRight, paddingTop, paddingBottom, frameWidth, frameHeight, paddingBottom)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify(overlapped ? 'Stacked chart created' : 'Grouped chart created')
   return frame
 }
 
 async function drawRadarChart(data: ChartData): Promise<FrameNode | null> {
-  const rows = parseData(data.data)
+  const rows = parseData(data.data, false, 'Radar')
   if (!rows.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1398,14 +1483,14 @@ async function drawRadarChart(data: ChartData): Promise<FrameNode | null> {
   }
 
   makeUniformScaleAdaptive(frame, size, frameHeight)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Radar chart created')
   return frame
 }
 
 async function drawPieChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, false, 'Pie')
   if (!entries.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1467,14 +1552,14 @@ async function drawPieChart(data: ChartData): Promise<FrameNode | null> {
     angleAcc += angle
   }
 
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Pie chart created')
   return frame
 }
 
 async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, false, 'Donut')
   if (!entries.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1519,15 +1604,15 @@ async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
     innerPts.reverse()
     const vertices = outerPts.concat(innerPts)
     const vec = figma.createVector()
-    const segs: any[] = []
+    const segs: VectorSegment[] = []
     for (let k = 0; k < vertices.length; k++) segs.push({ start: k, end: (k + 1) % vertices.length })
     const outerLoop = outerPts.map((_, idx) => idx)
     const innerLoop = innerPts.map((_, idx) => outerPts.length + idx)
-    await vec.setVectorNetworkAsync({ vertices, segments: segs, regions: [{ loops: [outerLoop, innerLoop], windingRule: 'NONZERO' }] } as any)
+    await vec.setVectorNetworkAsync({ vertices, segments: segs, regions: [{ loops: [outerLoop, innerLoop], windingRule: 'NONZERO' }] })
     vec.fills = [ solidPaint(colors[i]) ]
     vec.strokes = [ solidPaint(theme.bg) ]
     vec.strokeWeight = 4
-    try { vec.strokeAlign = 'INSIDE' } catch { }
+    try { vec.strokeAlign = 'INSIDE' } catch { /* best effort */ }
     frame.appendChild(vec)
     angleAcc += angle
   }
@@ -1546,14 +1631,14 @@ async function drawDonutChart(data: ChartData): Promise<FrameNode | null> {
     legendY += 72
   }
 
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Donut chart created')
   return frame
 }
 
 async function drawProgressChart(data: ChartData): Promise<FrameNode | null> {
-  const rows = parseMultiSeries(data.data)
+  const rows = parseMultiSeries(data.data, false, 'Progress')
   if (!rows.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1596,7 +1681,7 @@ async function drawProgressChart(data: ChartData): Promise<FrameNode | null> {
       const pct = r.values[1] !== 0 ? Math.round((diff / r.values[1]) * 100) : (r.values[0] > 0 ? 100 : 0)
       const sign = diff >= 0 ? '+' : ''
       const changeColor = diff >= 0 ? GREEN_TEXT : barColor
-      const changeTxt = await createTextNode(`${sign}${diff} / ${sign}${pct}% vs anterior`, MODERAT_MEDIUM, 18, changeColor)
+      const changeTxt = await createTextNode(`${sign}${formatNumber(diff)} / ${sign}${pct}% vs anterior`, MODERAT_MEDIUM, 18, changeColor)
       changeTxt.x = w - paddingX - (changeTxt.width || 0); changeTxt.y = y + 4; frame.appendChild(changeTxt)
     }
 
@@ -1630,7 +1715,7 @@ async function drawProgressChart(data: ChartData): Promise<FrameNode | null> {
       // inside a wider bar's still-colored region, use a contrasting color so it stays legible.
       for (let s = 1; s < seriesCount; s++) {
         const widerElsewhere = fillWidths.some((fw, idx) => idx !== s && fw >= fillWidths[s])
-        const val = await createTextNode(String(r.values[s]), MODERAT_MEDIUM, 24, widerElsewhere ? theme.bg : seriesColors[s])
+        const val = await createTextNode(formatNumber(r.values[s]), MODERAT_MEDIUM, 24, widerElsewhere ? theme.bg : seriesColors[s])
         val.x = paddingX + fillWidths[s] + 28; val.y = rowY + rowH / 2 - 12; frame.appendChild(val)
       }
     } else {
@@ -1649,7 +1734,7 @@ async function drawProgressChart(data: ChartData): Promise<FrameNode | null> {
     y += blockH + blockGap
   }
 
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify(overlapped ? 'Overlapped progress chart created' : 'Progress chart created')
   return frame
@@ -1663,10 +1748,7 @@ function daysInMonth(year: number, monthIndex0: number): number {
 interface TimelineRow { label: string; start: Date; end: Date; isPhase: boolean }
 // Row format is tab-separated cells ("Label \t YYYY-MM-DD \t YYYY-MM-DD \t phase|task") per
 // newline-separated row, in tree order (each phase immediately followed by its own
-// subtasks) — NOT the shared comma/colon/pipe format the other chart types use, since a
-// typed task label routinely contains a literal comma or colon ("Benchmark, análisis:
-// competencia."), which would get misread as a row/field boundary under that format (the
-// same reasoning behind Table's tab/newline format). Grouping is inferred purely from list
+// subtasks), like every other chart type's data. Grouping is inferred purely from list
 // order: a task row belongs to whichever phase row precedes it; a task with no preceding
 // phase (e.g. legacy data from before this tree structure existed) still renders, just
 // unindented, rather than being dropped.
@@ -1704,7 +1786,7 @@ function formatCurrency(n: number): string {
 // look. No resize-adaptation (like radar/pie/donut/progress) — a static frame is the
 // simplest, safest default for a first version of a structurally different chart type.
 async function drawBudgetChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, true)
   if (!entries.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -1758,7 +1840,7 @@ async function drawBudgetChart(data: ChartData): Promise<FrameNode | null> {
   box.fills = []
   box.strokes = [solidPaint(theme.grid)]
   box.strokeWeight = 1
-  try { box.cornerRadius = 4 } catch { }
+  try { box.cornerRadius = 4 } catch { /* best effort */ }
   box.clipsContent = false
   frame.appendChild(box)
 
@@ -1822,15 +1904,14 @@ async function drawBudgetChart(data: ChartData): Promise<FrameNode | null> {
   frame.appendChild(footnote)
 
   makeBoxListAdaptive(frame, box)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Budget created')
   return frame
 }
 
-// Table: newline-separated rows of tab-separated cells. Free-text sentences routinely
-// contain literal commas and periods (see the reference design), so — unlike every other
-// chart type — this deliberately does NOT go through parseData's comma/colon/pipe format.
+// Table: newline-separated rows of tab-separated cells, kept as free text (no number
+// parsing), so sentences with commas and periods come through untouched.
 function parseTableRows(dataStr: string, columnsStr: string | undefined): { columns: string[]; rows: string[][] } {
   const columns = String(columnsStr || '').split('\t').map(c => c.trim()).filter(c => c.length > 0)
   const finalColumns = columns.length >= 2 ? columns : ['Column 1', 'Column 2']
@@ -1906,7 +1987,7 @@ async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
     try {
       t.textAutoResize = 'HEIGHT'
       t.resize(Math.max(1, width - CELL_PAD_RIGHT), t.height || size)
-    } catch { }
+    } catch { /* best effort */ }
     return t
   }
   const addDivider = async (y: number) => {
@@ -1976,7 +2057,7 @@ async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
   box.fills = []
   box.strokes = [solidPaint(theme.grid)]
   box.strokeWeight = 1
-  try { box.cornerRadius = 4 } catch { }
+  try { box.cornerRadius = 4 } catch { /* best effort */ }
   box.clipsContent = false
 
   const contentChildren = [...frame.children]
@@ -1992,15 +2073,13 @@ async function drawTableChart(data: ChartData): Promise<FrameNode | null> {
   frame.resize(frameWidth, frameHeight)
 
   makeBoxListAdaptive(frame, box)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Table created')
   return frame
 }
 
-// Tab-separated cells (Title / Page / Hidden) per newline-separated row — same free-text-safe
-// format as Table/KPI, since a slide's title routinely contains a literal comma or colon that
-// the shared comma-based format would misread as a row/field boundary. Hidden ('1' or empty)
+// Tab-separated cells (Title / Page / Hidden) per newline-separated row. Hidden ('1' or empty)
 // is set from the UI's per-entry hide toggle — a hidden row is kept here (and in the saved
 // chart data) so it survives being reopened for editing, but drawIndexChart filters it out
 // before it ever reaches the drawn chart.
@@ -2300,7 +2379,7 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
   box.fills = []
   box.strokes = [solidPaint(theme.grid)]
   box.strokeWeight = 1
-  try { box.cornerRadius = 4 } catch { }
+  try { box.cornerRadius = 4 } catch { /* best effort */ }
   box.clipsContent = false
 
   const contentChildren = [...frame.children]
@@ -2316,7 +2395,7 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
   frame.resize(frameWidth, frameHeight)
 
   makeBoxListAdaptive(frame, box)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Index created')
   return frame
@@ -2325,7 +2404,7 @@ async function drawIndexChart(data: ChartData): Promise<FrameNode | null> {
 interface KpiStat { label: string; value: string; description: string }
 
 // Tab-separated cells (Label / Value / Description) per newline-separated row — Description
-// is free-text with commas/periods, same reasoning as Table and Index.
+// is free text.
 function parseKpiRows(str: string): KpiStat[] {
   const out: KpiStat[] = []
   for (const line of String(str || '').split('\n')) {
@@ -2417,7 +2496,7 @@ async function drawKpiStat(parent: FrameNode, stat: KpiStat, x: number, y: numbe
   // children of an auto-layout frame in this codebase and, if it silently fails, leaves the
   // node at its own single-line width: undersized for wrapping (so height reads too short,
   // letting later blocks overlap it) and free to render past the column's edge sideways.
-  const lockWidth = (t: TextNode) => { try { t.textAutoResize = 'HEIGHT'; t.resize(Math.max(1, w), t.height || 1) } catch { } }
+  const lockWidth = (t: TextNode) => { try { t.textAutoResize = 'HEIGHT'; t.resize(Math.max(1, w), t.height || 1) } catch { /* best effort */ } }
 
   // The value itself is deliberately left at its natural single-line width — never wrapped,
   // since a number breaking across lines would look broken — card.clipsContent above is the
@@ -2662,7 +2741,7 @@ async function drawKpiChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(colDivider)
   }
 
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('KPI created')
   return frame
@@ -2924,21 +3003,21 @@ async function drawTimelineChart(data: ChartData): Promise<FrameNode | null> {
     // auto-layout frame — set after appendChild, not before, so it reliably takes effect
     // and the bar keeps tracking the row-entry's width through a later live resize.
     rowEntry.appendChild(bar)
-    try { (bar as any).layoutSizingHorizontal = 'FILL' } catch { }
+    try { bar.layoutSizingHorizontal = 'FILL' } catch { /* best effort */ }
 
     frame.appendChild(rowEntry)
     curY += naturalHeight + ROW_GAP
   }
 
   makeTimelineAdaptive(frame, paddingLeft, paddingRight, frameWidth, frameHeight)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Timeline created')
   return frame
 }
 
 async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, true)
   if (!entries.length) {
     figma.notify('No data entries to draw')
     return null
@@ -2966,17 +3045,18 @@ async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
   frame.clipsContent = false
   frame.layoutMode = 'NONE'
 
-  const maxVal = Math.max(...entries.map(e => e.value))
+  const values = entries.map(e => e.value)
   const barAreaWidth = frameWidth - paddingLeft - paddingRight
-  const nice = niceScale(maxVal, 8)
-  const scale = nice.max > 0 ? barAreaWidth / nice.max : 1
+  const nice = niceRange(Math.min(...values), Math.max(...values), 8)
+  const scale = barAreaWidth / (nice.max - nice.min)
+  const zeroX = Math.round(paddingLeft - nice.min * scale)
   const chartBottom = paddingTop + colCount * rowHeight + (colCount - 1) * rowGap
 
   for (let i = 0; i < nice.ticks.length; i++) {
     const v = nice.ticks[i]
-    const x = Math.round(paddingLeft + v * scale)
+    const x = Math.round(paddingLeft + (v - nice.min) * scale)
     const tick = await makeVectorPolyline([{ x, y: paddingTop }, { x, y: chartBottom }], theme.grid, 1)
-    try { (tick as any).dashPattern = GRID_DASH } catch { }
+    tick.dashPattern = GRID_DASH
     frame.appendChild(tick)
 
     const lbl = await createTextNode(formatAxisValue(v), MODERAT_REGULAR, TICK_FONT_SIZE, theme.text)
@@ -2985,6 +3065,7 @@ async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(lbl)
   }
   await addCartesianAxes(frame, theme, paddingLeft, paddingTop, frameWidth - paddingLeft - paddingRight, chartBottom - paddingTop)
+  if (nice.min < 0) await addZeroLine(frame, theme, { x: zeroX, y: paddingTop }, { x: zeroX, y: chartBottom })
 
   const barColor = normalizeColor(data.barColor, RED_NORTH)
   for (let i = 0; i < entries.length; i++) {
@@ -3000,21 +3081,25 @@ async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
     lbl.y = Math.round(y + rowHeight / 2 - TICK_LABEL_FONT_SIZE / 2)
     frame.appendChild(lbl)
 
-    const w = Math.max(2, Math.round(e.value * scale))
+    const w = Math.max(2, Math.round(Math.abs(e.value) * scale))
+    // Positive bars grow right from the zero line, negative ones grow left.
+    const barX = e.value >= 0 ? zeroX : zeroX - w
 
     const bar = createRect(w, rowHeight, solidPaint(barColor))
-    bar.x = paddingLeft
+    bar.x = barX
     bar.y = y
     frame.appendChild(bar)
 
     const valTxt = await createValueLabel(e.value, VALUE_FONT_SIZE, theme.text)
-    valTxt.x = paddingLeft + w + 28
+    // Negative bars put their number on the empty side of the zero line, so it never
+    // collides with the row labels on the left.
+    valTxt.x = e.value >= 0 ? zeroX + w + 28 : zeroX + 28
     valTxt.y = Math.round(y + rowHeight / 2 - VALUE_FONT_SIZE / 2)
     frame.appendChild(valTxt)
   }
 
   makeChartAdaptive(frame, paddingLeft, paddingRight, paddingTop, paddingBottom, frameWidth, frameHeight)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   await figma.clientStorage.setAsync(CHART_DATA_KEY, data)
   placeNewChartFrame(frame)
   figma.notify('Horizontal chart created')
@@ -3034,12 +3119,10 @@ async function drawHorizontalChart(data: ChartData): Promise<FrameNode | null> {
 // combined height in one piece (not a per-row segment), so it reads as a single unbroken
 // line rather than a dashed-looking stack of fragments — its height is deliberately derived
 // from the exact same rowHeight/rowGap math as the other columns' total content height, so
-// it lines up with the first row's top edge and the last row's bottom edge exactly. Reuses
-// the shared comma-based parseData — funnel values are always simple positive counts, so no
-// custom tab-separated parser is needed the way Index/KPI required for their extra per-row
-// fields.
+// it lines up with the first row's top edge and the last row's bottom edge exactly. Uses the
+// shared parseData (one value per row, positives only).
 async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, false, 'Funnel')
   if (!entries.length) {
     figma.notify('No data entries to draw')
     return null
@@ -3133,12 +3216,12 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     slot.clipsContent = false
     return slot
   }
-  const lockWidth = (t: TextNode, w: number) => { try { t.textAutoResize = 'HEIGHT'; t.resize(Math.max(1, w), t.height || 1) } catch { } }
+  const lockWidth = (t: TextNode, w: number) => { try { t.textAutoResize = 'HEIGHT'; t.resize(Math.max(1, w), t.height || 1) } catch { /* best effort */ } }
   // Every row slot (as opposed to the header spacer above it) grows to absorb its share of
   // any extra height the frame is dragged to on canvas — identically in every column, so
   // row i still lines up across all four columns after a resize. Text inside a slot only
   // re-centers (CENTER, no distortion); slot itself just needs to actually grow (FILL).
-  const growVertically = (node: SceneNode) => { try { (node as any).layoutSizingVertical = 'FILL' } catch { } }
+  const growVertically = (node: SceneNode) => { try { if ('layoutSizingVertical' in node) node.layoutSizingVertical = 'FILL' } catch { /* best effort */ } }
 
   // Label column: blank header spacer, then one right-aligned label per row.
   const labelCol = makeColumn('funnel-labels', labelColWidth, frameHeight)
@@ -3150,19 +3233,19 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     lockWidth(lbl, labelColWidth)
     lbl.x = 0
     lbl.y = Math.round(rowHeight / 2 - TICK_LABEL_FONT_SIZE / 2)
-    try { (lbl as any).constraints = { horizontal: 'MIN', vertical: 'CENTER' } } catch { }
+    setConstraints(lbl, 'MIN', 'CENTER')
     slot.appendChild(lbl)
     labelCol.appendChild(slot)
     growVertically(slot)
   }
   frame.appendChild(labelCol)
-  try { (labelCol as any).layoutSizingVertical = 'FILL' } catch { }
+  try { labelCol.layoutSizingVertical = 'FILL' } catch { /* best effort */ }
 
   // Bar column: blank header spacer, then one centered, value-proportional bar per row.
   const barCol = makeColumn('funnel-bars', barZoneWidth, frameHeight)
   const barHeaderSpacer = makeSlot(barZoneWidth, headerHeight)
   barCol.appendChild(barHeaderSpacer)
-  try { (barHeaderSpacer as any).layoutSizingHorizontal = 'FILL' } catch { }
+  try { barHeaderSpacer.layoutSizingHorizontal = 'FILL' } catch { /* best effort */ }
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i]
     const slot = makeSlot(barZoneWidth, rowHeight)
@@ -3175,7 +3258,7 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     // widens (the same trick the rest of this plugin's charts use for value-proportional
     // bars) — STRETCH so its thickness always exactly matches the slot's (possibly grown)
     // row height instead of leaving a gap above/below it.
-    try { (bar as any).constraints = { horizontal: 'SCALE', vertical: 'STRETCH' } } catch { }
+    setConstraints(bar, 'SCALE', 'STRETCH')
     slot.appendChild(bar)
 
     const valTxt = await createValueLabel(e.value, VALUE_FONT_SIZE, theme.text)
@@ -3186,16 +3269,16 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     // because both started at the same fixed gap and scale by the same ratio, the value
     // label lands exactly at the bar's new end position after any width resize.
     const valAnchor = wrapInAnchor(slot, valTxt, slot.children.length)
-    try { (valAnchor as any).constraints = { horizontal: 'SCALE', vertical: 'CENTER' } } catch { }
+    setConstraints(valAnchor, 'SCALE', 'CENTER')
     barCol.appendChild(slot)
     growVertically(slot)
     // Also grow horizontally, tracking barCol's own FILL-driven width — without this the
     // slot would stay pinned at its original width even as the column around it widens,
     // leaving the bar's SCALE constraint with nothing to actually react to.
-    try { (slot as any).layoutSizingHorizontal = 'FILL' } catch { }
+    try { slot.layoutSizingHorizontal = 'FILL' } catch { /* best effort */ }
   }
   frame.appendChild(barCol)
-  try { (barCol as any).layoutSizingHorizontal = 'FILL'; (barCol as any).layoutSizingVertical = 'FILL' } catch { }
+  try { barCol.layoutSizingHorizontal = 'FILL'; barCol.layoutSizingVertical = 'FILL' } catch { /* best effort */ }
 
   // Extra gap column: on top of the normal cellGap already on both its sides, this pushes
   // the divider/Conv. Rate block further away from the bars specifically.
@@ -3215,7 +3298,7 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
   dividerCol.appendChild(dividerLine)
   growVertically(dividerLine)
   frame.appendChild(dividerCol)
-  try { (dividerCol as any).layoutSizingVertical = 'FILL' } catch { }
+  try { dividerCol.layoutSizingVertical = 'FILL' } catch { /* best effort */ }
 
   // Conv. Rate column: header label, then one centered percentage per row (blank on row 1).
   const convCol = makeColumn('funnel-conv-rate', convColWidth, frameHeight)
@@ -3231,21 +3314,21 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
     const slot = makeSlot(convColWidth, rowHeight)
     if (i > 0 && entries[i - 1].value > 0) {
       const pct = (entries[i].value / entries[i - 1].value) * 100
-      const pctTxt = await createTextNode(pct.toFixed(1) + '%', MODERAT_MEDIUM, VALUE_FONT_SIZE, theme.text)
+      const pctTxt = await createTextNode(formatNumber(pct, 1) + '%', MODERAT_MEDIUM, VALUE_FONT_SIZE, theme.text)
       pctTxt.textAlignHorizontal = 'CENTER'
       lockWidth(pctTxt, convColWidth)
       pctTxt.x = 0
       pctTxt.y = Math.round(rowHeight / 2 - VALUE_FONT_SIZE / 2)
-      try { (pctTxt as any).constraints = { horizontal: 'MIN', vertical: 'CENTER' } } catch { }
+      setConstraints(pctTxt, 'MIN', 'CENTER')
       slot.appendChild(pctTxt)
     }
     convCol.appendChild(slot)
     growVertically(slot)
   }
   frame.appendChild(convCol)
-  try { (convCol as any).layoutSizingVertical = 'FILL' } catch { }
+  try { convCol.layoutSizingVertical = 'FILL' } catch { /* best effort */ }
 
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   await figma.clientStorage.setAsync(CHART_DATA_KEY, data)
   placeNewChartFrame(frame)
   figma.notify('Funnel chart created')
@@ -3255,11 +3338,11 @@ async function drawFunnelChart(data: ChartData): Promise<FrameNode | null> {
 // Force graph / network: one center node radiating straight lines to every other node,
 // arranged evenly around it — a static stand-in for a physics-based force layout (this
 // plugin has no runtime simulation loop to relax node positions against), but reads the
-// same way: one hub, everything else orbiting it, sized by its own value. Reuses the plain
-// label:value comma format (parseData) — the first entry is always the hub, everything
+// same way: one hub, everything else orbiting it, sized by its own value. Uses the shared
+// parseData (one value per row) — the first entry is always the hub, everything
 // after it is a satellite.
 async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, false, 'Network')
   if (!entries.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -3332,13 +3415,13 @@ async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
 
   const centerLbl = await createTextNode(center.label, MODERAT_MEDIUM, TICK_LABEL_FONT_SIZE, theme.bg)
   centerLbl.textAlignHorizontal = 'CENTER'
-  try { centerLbl.textAutoResize = 'HEIGHT'; centerLbl.resize(Math.max(1, CENTER_R * 1.7), centerLbl.height || TICK_LABEL_FONT_SIZE) } catch { }
+  try { centerLbl.textAutoResize = 'HEIGHT'; centerLbl.resize(Math.max(1, CENTER_R * 1.7), centerLbl.height || TICK_LABEL_FONT_SIZE) } catch { /* best effort */ }
   centerLbl.x = Math.round(cx - (centerLbl.width || CENTER_R * 1.7) / 2)
   centerLbl.y = Math.round(cy - (centerLbl.height || TICK_LABEL_FONT_SIZE) / 2)
   frame.appendChild(centerLbl)
 
   makeUniformScaleAdaptive(frame, size, frameHeight)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Network chart created')
   return frame
@@ -3347,11 +3430,11 @@ async function drawForceGraphChart(data: ChartData): Promise<FrameNode | null> {
 // Petal rose (a.k.a. Nightingale/coxcomb chart): every category gets an equal angular
 // slice, like a pie, but its RADIUS (not its angle) encodes the value — so the biggest
 // numbers visually dominate as the largest petals rather than just the widest wedge.
-// Reuses parseData's plain label:value comma format, same as Pie/Donut. The few standout
+// Uses the shared parseData, same as Pie/Donut. The few standout
 // values (top 3) render in the brand color; everything else stays muted, mirroring the
 // reference's "what actually stood out" reading.
 async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
-  const entries = parseData(data.data)
+  const entries = parseData(data.data, false, 'Petals')
   if (!entries.length) { figma.notify('No data'); return null }
   await loadFonts(data)
   const theme = getTheme(data.theme)
@@ -3422,7 +3505,7 @@ async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
   frame.appendChild(hub)
 
   makeUniformScaleAdaptive(frame, size, frameHeight)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Petal chart created')
   return frame
@@ -3430,9 +3513,7 @@ async function drawPetalRoseChart(data: ChartData): Promise<FrameNode | null> {
 
 interface TreeItem { label: string; category: string }
 
-// Tab-separated (Item / Category) per newline-separated row — a category name is free text
-// that could carry its own punctuation, so this uses the same safe tab/newline convention as
-// Table/KPI rather than the comma-based format everything simpler uses.
+// Tab-separated (Item / Category) per newline-separated row, both kept as free text.
 function parseTreeItems(str: string): TreeItem[] {
   const out: TreeItem[] = []
   for (const line of String(str || '').split('\n')) {
@@ -3455,8 +3536,8 @@ async function makeCurvedConnector(p1: { x: number; y: number }, p2: { x: number
   const vec = figma.createVector()
   const dx = (p2.x - p1.x) / 2
   const vertices = [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }]
-  const segments = [{ start: 0, end: 1, tangentStart: { x: dx, y: 0 }, tangentEnd: { x: -dx, y: 0 } }] as any[]
-  await vec.setVectorNetworkAsync({ vertices, segments, regions: [] } as any)
+  const segments: VectorSegment[] = [{ start: 0, end: 1, tangentStart: { x: dx, y: 0 }, tangentEnd: { x: -dx, y: 0 } }]
+  await vec.setVectorNetworkAsync({ vertices, segments, regions: [] })
   vec.strokes = [solidPaint(stroke)]
   vec.strokeWeight = weight
   vec.fills = []
@@ -3543,7 +3624,7 @@ async function drawTreeChart(data: ChartData): Promise<FrameNode | null> {
     const y = itemsTop + i * ITEM_ROW_H + ITEM_ROW_H / 2
     const lbl = await createTextNode(it.label, MODERAT_REGULAR, ITEM_FONT, theme.muted)
     lbl.textAlignHorizontal = 'LEFT'
-    try { lbl.textAutoResize = 'HEIGHT'; lbl.resize(Math.max(1, maxItemLabelW), lbl.height || ITEM_FONT) } catch { }
+    try { lbl.textAutoResize = 'HEIGHT'; lbl.resize(Math.max(1, maxItemLabelW), lbl.height || ITEM_FONT) } catch { /* best effort */ }
     lbl.x = paddingLeft
     lbl.y = Math.round(y - (lbl.height || ITEM_FONT) / 2)
     frame.appendChild(lbl)
@@ -3570,7 +3651,7 @@ async function drawTreeChart(data: ChartData): Promise<FrameNode | null> {
       { x: p.x, y: p.y }, { x: target.x - target.r, y: target.y },
       catColorOf.get(p.category) || theme.grid, 1.2
     )
-    try { line.opacity = 0.45 } catch { }
+    try { line.opacity = 0.45 } catch { /* best effort */ }
     frame.appendChild(line)
   }
 
@@ -3584,14 +3665,14 @@ async function drawTreeChart(data: ChartData): Promise<FrameNode | null> {
     frame.appendChild(dot)
 
     const lbl = await createTextNode(c.name.toUpperCase() + ' · ' + c.count, MODERAT_MEDIUM, CAT_FONT, theme.text)
-    try { lbl.letterSpacing = { value: 4, unit: 'PERCENT' } } catch { }
+    try { lbl.letterSpacing = { value: 4, unit: 'PERCENT' } } catch { /* best effort */ }
     lbl.x = Math.round(pos.x + pos.r + catLabelGap)
     lbl.y = Math.round(pos.y - (lbl.height || CAT_FONT) / 2)
     frame.appendChild(lbl)
   }
 
   makeUniformScaleAdaptive(frame, frameWidth, frameHeight)
-  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { }
+  try { frame.setPluginData(TOOL_ID, JSON.stringify(data)) } catch { /* best effort */ }
   placeNewChartFrame(frame)
   figma.notify('Tree chart created')
   return frame
